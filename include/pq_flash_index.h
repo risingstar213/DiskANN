@@ -23,6 +23,9 @@ namespace diskann
 
 template <typename T, typename LabelT = uint32_t> class PQFlashIndex
 {
+    // Friend declaration to allow AsyncPQFlashIndex access to private members
+    template <typename U, typename V> friend class AsyncPQFlashIndex;
+    
   public:
     DISKANN_DLLEXPORT PQFlashIndex(std::shared_ptr<AlignedFileReader> &fileReader,
                                    diskann::Metric metric = diskann::Metric::L2);
