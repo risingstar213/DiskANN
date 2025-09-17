@@ -46,12 +46,6 @@ private:
         const uint32_t io_limit, const bool use_reorder_data,
         QueryStats *stats);
 
-    // Helper to handle async IO operations
-    DISKANN_DLLEXPORT Task<void> async_read_frontier_nhoods(
-        std::vector<std::pair<uint32_t, char *>> &frontier_nhoods,
-        std::vector<AlignedRead> &frontier_read_reqs,
-        QueryStats *stats);
-
     std::shared_ptr<AsyncLinuxAlignedFileReader> async_reader;
 };
 

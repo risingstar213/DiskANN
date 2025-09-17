@@ -64,18 +64,6 @@ diskann::Task<void> async_single_search(
         use_reorder_data, stats);
 }
 
-// 简化的协程运行器
-template<typename T>
-void run_coroutine(diskann::Task<T> &&task) {
-    while (task.coro && !task.coro.done()) {
-        task.coro.resume();
-        std::this_thread::sleep_for(std::chrono::microseconds(1));
-    }
-    if (task.coro && task.coro.promise().exception) {
-        std::rethrow_exception(task.coro.promise().exception);
-    }
-}
-
 // 主搜索函数 - 仿照 search_disk_index 的结构
 template <typename T, typename LabelT = uint32_t>
 int async_search_disk_index(diskann::Metric &metric, const std::string &index_path_prefix,
@@ -145,6 +133,10 @@ int async_search_disk_index(diskann::Metric &metric, const std::string &index_pa
     node_list.clear();
     node_list.shrink_to_fit();
 
+    // 初始化调度器
+    diskann::init_scheduler();
+    diskann::CoroutineScheduler *scheduler = diskann::get_cor_scheduler();
+
     uint64_t warmup_L = 20;
     uint64_t warmup_num = 0, warmup_dim = 0, warmup_aligned_dim = 0;
     T *warmup = nullptr;
@@ -184,7 +176,8 @@ int async_search_disk_index(diskann::Metric &metric, const std::string &index_pa
                     _pFlashIndex, warmup + i * warmup_aligned_dim, 1, warmup_L,
                     &warmup_result_ids_64[i], &warmup_result_dists[i],
                     4, false, LabelT{}, false, nullptr);
-                run_coroutine(std::move(warmup_task));
+                scheduler->schedule_coroutine(warmup_task.coro);
+                scheduler->run(); // 立即运行以完成预热
             }
             diskann::cout << "..done" << std::endl;
         } catch (const std::exception& e) {
@@ -266,10 +259,10 @@ int async_search_disk_index(diskann::Metric &metric, const std::string &index_pa
             }
             
             // 运行所有协程任务
-            for (auto &task : search_tasks) {
-                run_coroutine(std::move(task));
+            for (uint32_t i = 0; i < search_tasks.size(); i++) {
+                scheduler->schedule_coroutine(search_tasks[i].coro);
+                scheduler->run(); // 每100个任务运行一次调度器
             }
-
         } catch (const std::exception& e) {
             diskann::cout << "Search failed: " << e.what() << std::endl;
             delete[] stats;

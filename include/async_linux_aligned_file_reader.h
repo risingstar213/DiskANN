@@ -13,7 +13,6 @@ class AsyncLinuxAlignedFileReader : public AlignedFileReader
   private:
     uint64_t file_sz;
     FileHandle file_desc;
-    diskann::CoroutineScheduler* scheduler;
 
   public:
     AsyncLinuxAlignedFileReader();

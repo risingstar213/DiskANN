@@ -10,7 +10,7 @@
 
 namespace diskann {
 
-std::unique_ptr<CoroutineScheduler> g_scheduler;
+thread_local std::unique_ptr<CoroutineScheduler> g_scheduler;
 
 CoroutineScheduler::CoroutineScheduler() {
     memset(&ring, 0, sizeof(ring));
@@ -40,6 +40,9 @@ void CoroutineScheduler::run() {
         
         // Small yield to prevent busy waiting
         if (ready_queue.empty()) {
+            if (pending_ops.empty()) {
+                break; // Exit if no pending operations and no ready coroutines
+            }
             std::this_thread::sleep_for(std::chrono::microseconds(1));
         }
     }

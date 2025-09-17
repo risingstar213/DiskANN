@@ -9,6 +9,7 @@
 #include <queue>
 #include <thread>
 #include <atomic>
+#include <stdexcept>
 #include <liburing.h>
 #include <vector>
 #include <unordered_map>
@@ -26,7 +27,8 @@ struct Task {
         Task get_return_object() {
             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
-        std::suspend_never initial_suspend() { return {}; }
+        // 惰性
+        std::suspend_always initial_suspend() { return {}; }
         auto final_suspend() noexcept {
             struct Awaiter {
                 bool await_ready() noexcept { return false; }
@@ -83,7 +85,8 @@ struct Task {
         if (coro.promise().exception) {
             std::rethrow_exception(coro.promise().exception);
         }
-        return std::move(coro.promise().result);
+        T result = std::move(coro.promise().result);
+        return std::move(result);
     }
 };
 
@@ -94,7 +97,7 @@ struct Task<void> {
         Task get_return_object() {
             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
-        std::suspend_never initial_suspend() { return {}; }
+        std::suspend_always initial_suspend() { return {}; }
         auto final_suspend() noexcept {
             struct Awaiter {
                 bool await_ready() noexcept { return false; }
@@ -149,6 +152,7 @@ struct Task<void> {
         if (coro.promise().exception) {
             std::rethrow_exception(coro.promise().exception);
         }
+        return;
     }
 };
 
@@ -165,7 +169,9 @@ struct IOAwaitable {
     void await_suspend(std::coroutine_handle<> h) noexcept {
         waiting_coroutine = h;
     }
-    int await_resume() const noexcept { return result; }
+    int await_resume() const noexcept {
+        return result;
+    }
 };
 
 // Coroutine scheduler using io_uring
@@ -209,12 +215,23 @@ private:
     void execute_ready_coroutines();
 };
 
-// Global scheduler instance
-extern std::unique_ptr<CoroutineScheduler> g_scheduler;
+// Thread-local scheduler instance for multi-threading isolation
+extern thread_local std::unique_ptr<CoroutineScheduler> g_scheduler;
 
 // Helper to get the scheduler
-inline CoroutineScheduler& get_scheduler() {
-    return *g_scheduler;
+inline CoroutineScheduler* get_cor_scheduler() {
+    if (!g_scheduler) {
+        throw std::runtime_error("Scheduler not available - call init_scheduler() first");
+    }
+    return g_scheduler.get();
+}
+
+// Helper to initialize the scheduler for the current thread
+inline void init_scheduler() {
+    if (!g_scheduler) {
+        g_scheduler = std::make_unique<CoroutineScheduler>();
+        g_scheduler->init();
+    }
 }
 
 } // namespace diskann

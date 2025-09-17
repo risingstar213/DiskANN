@@ -27,8 +27,13 @@ diskann::Task<void> test_basic_coroutine() {
     }
     
     std::vector<char> test_data(4096, 'A');  // 4KB of 'A's
-    write(fd, test_data.data(), test_data.size());
+    ssize_t bytes_written = write(fd, test_data.data(), test_data.size());
     close(fd);
+    
+    if (bytes_written != static_cast<ssize_t>(test_data.size())) {
+        std::cout << "Failed to write test data completely" << std::endl;
+        co_return;
+    }
     
     // Test async reading
     AsyncLinuxAlignedFileReader reader;
@@ -94,9 +99,19 @@ diskann::Task<void> test_concurrent_reads() {
         
         // Write test data
         int fd = open(test_file.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd == -1) {
+            std::cout << "Failed to create test file " << i << std::endl;
+            co_return;
+        }
+        
         std::vector<char> test_data(4096, 'A' + i);  // Different content for each file
-        write(fd, test_data.data(), test_data.size());
+        ssize_t bytes_written = write(fd, test_data.data(), test_data.size());
         close(fd);
+        
+        if (bytes_written != static_cast<ssize_t>(test_data.size())) {
+            std::cout << "Failed to write test data completely for file " << i << std::endl;
+            co_return;
+        }
         
         readers.emplace_back(std::make_unique<AsyncLinuxAlignedFileReader>());
         readers.back()->open(test_file);
@@ -164,8 +179,7 @@ int main() {
     std::cout << "Starting DiskANN Coroutine Tests" << std::endl;
     
     // Initialize scheduler
-    diskann::g_scheduler = std::make_unique<diskann::CoroutineScheduler>();
-    diskann::g_scheduler->init();
+    diskann::init_scheduler();
     
     std::cout << "Scheduler initialized" << std::endl;
     
@@ -176,8 +190,8 @@ int main() {
     auto test2 = test_concurrent_reads();
     
     // Schedule tests
-    diskann::get_scheduler().schedule_coroutine(test1.coro);
-    diskann::get_scheduler().schedule_coroutine(test2.coro);
+    diskann::get_cor_scheduler()->schedule_coroutine(test1.coro);
+    diskann::get_cor_scheduler()->schedule_coroutine(test2.coro);
     
     // Run scheduler in separate thread
     std::thread scheduler_thread([&]() {

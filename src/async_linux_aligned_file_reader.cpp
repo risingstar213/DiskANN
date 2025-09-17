@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
-#include "async_linux_aligned_file_reader.h"
 #include <cassert>
 #include <cstdio>
 #include <iostream>
@@ -10,8 +9,11 @@
 #include <sys/stat.h>
 #include "utils.h"
 
+#include "async_linux_aligned_file_reader.h"
+#include "coroutine_scheduler.h"
+
 AsyncLinuxAlignedFileReader::AsyncLinuxAlignedFileReader() 
-    : file_desc(-1), scheduler(diskann::g_scheduler.get()) {
+    : file_desc(-1) {
 }
 
 AsyncLinuxAlignedFileReader::~AsyncLinuxAlignedFileReader() {
@@ -96,10 +98,12 @@ void AsyncLinuxAlignedFileReader::read(std::vector<AlignedRead> &read_reqs, IOCo
 }
 
 diskann::Task<void> AsyncLinuxAlignedFileReader::async_read_coro(std::vector<AlignedRead> &read_reqs) {
-    if (!scheduler) {
-        throw std::runtime_error("Scheduler not available");
-    }
+    diskann::CoroutineScheduler *scheduler = diskann::get_cor_scheduler();
     
+    if (scheduler == nullptr) {
+        throw std::runtime_error("Coroutine scheduler not initialized. Call init_scheduler() first.");
+    }
+
     assert(this->file_desc != -1);
     
     // Validate alignment
@@ -124,10 +128,11 @@ diskann::Task<void> AsyncLinuxAlignedFileReader::async_read_coro(std::vector<Ali
 }
 
 diskann::Task<std::vector<int>> AsyncLinuxAlignedFileReader::async_read_batch(std::vector<AlignedRead> &read_reqs) {
-    if (!scheduler) {
-        throw std::runtime_error("Scheduler not available");
+    diskann::CoroutineScheduler *scheduler = diskann::get_cor_scheduler();
+    if (scheduler == nullptr) {
+        throw std::runtime_error("Coroutine scheduler not initialized. Call init_scheduler() first.");
     }
-    
+
     assert(this->file_desc != -1);
     
     // Validate alignment

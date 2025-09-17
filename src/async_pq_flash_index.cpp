@@ -8,6 +8,10 @@
 #include "pq_scratch.h"
 #include <chrono>
 
+// Macros for reordering data access - same as in pq_flash_index.cpp
+#define VECTOR_SECTOR_NO(id) (((uint64_t)(id)) / this->_nvecs_per_sector + this->_reorder_data_start_sector)
+#define VECTOR_SECTOR_OFFSET(id) ((((uint64_t)(id)) % this->_nvecs_per_sector) * this->_data_dim * sizeof(T))
+
 namespace diskann {
 
 template <typename T, typename LabelT>
@@ -85,28 +89,29 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
     const uint32_t io_limit, const bool use_reorder_data,
     QueryStats *stats) {
     
-    // Basic validation
+    // Basic validation - same as original
     uint64_t num_sector_per_nodes = DIV_ROUND_UP(this->_max_node_len, defaults::SECTOR_LEN);
     if (beam_width > num_sector_per_nodes * defaults::MAX_N_SECTOR_READS) {
-        throw ANNException("Beamwidth too high for sector reads", -1, __FUNCSIG__, __FILE__, __LINE__);
+        throw ANNException("Beamwidth can not be higher than defaults::MAX_N_SECTOR_READS", -1, __FUNCSIG__, __FILE__, __LINE__);
     }
     
-    // Get thread data (this needs to be thread-safe in coroutine context)
+    // Get thread data - same as original
     ScratchStoreManager<SSDThreadData<T>> manager(this->_thread_data);
     auto data = manager.scratch_space();
+    IOContext &ctx = data->ctx;
     auto query_scratch = &(data->scratch);
     auto pq_query_scratch = query_scratch->pq_scratch();
     
-    // Reset query scratch
+    // Reset query scratch - same as original
     query_scratch->reset();
     
-    // Initialize query data (similar to original cached_beam_search)
+    // Copy query to thread specific aligned memory - same as original
     float query_norm = 0;
     T *aligned_query_T = query_scratch->aligned_query_T();
     float *query_float = pq_query_scratch->aligned_query_float;
     float *query_rotated = pq_query_scratch->rotated_query;
     
-    // Normalization (copy from original implementation)
+    // Normalization step - exactly same as original
     if (this->metric == diskann::Metric::INNER_PRODUCT || this->metric == diskann::Metric::COSINE) {
         uint64_t inherent_dim = (this->metric == diskann::Metric::COSINE) ? 
             this->_data_dim : (uint64_t)(this->_data_dim - 1);
@@ -131,24 +136,26 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
         pq_query_scratch->initialize(this->_data_dim, aligned_query_T);
     }
     
-    // Initialize buffers and structures
+    // Pointers to buffers for data - same as original
     T *data_buf = query_scratch->coord_scratch;
     _mm_prefetch((char *)data_buf, _MM_HINT_T1);
     
+    // Sector scratch - same as original
     char *sector_scratch = query_scratch->sector_scratch;
     uint64_t &sector_scratch_idx = query_scratch->sector_idx;
     const uint64_t num_sectors_per_node = this->_nnodes_per_sector > 0 ? 
         1 : DIV_ROUND_UP(this->_max_node_len, defaults::SECTOR_LEN);
     
-    // PQ preprocessing
+    // Query <-> PQ chunk centers distances - same as original
     this->_pq_table.preprocess_query(query_rotated);
     float *pq_dists = pq_query_scratch->aligned_pqtable_dist_scratch;
     this->_pq_table.populate_chunk_distances(query_rotated, pq_dists);
     
+    // Query <-> neighbor list - same as original
     float *dist_scratch = pq_query_scratch->aligned_dist_scratch;
     uint8_t *pq_coord_scratch = pq_query_scratch->aligned_pq_coord_scratch;
     
-    // Lambda for distance computation
+    // Lambda to batch compute query<-> node distances in PQ space - same as original
     auto compute_dists = [this, pq_coord_scratch, pq_dists](const uint32_t *ids, const uint64_t n_ids, float *dists_out) {
         diskann::aggregate_coords(ids, n_ids, this->data, this->_n_chunks, pq_coord_scratch);
         diskann::pq_dist_lookup(pq_coord_scratch, n_ids, this->_n_chunks, pq_dists, dists_out);
@@ -161,7 +168,7 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
     retset.reserve(l_search);
     std::vector<Neighbor> &full_retset = query_scratch->full_retset;
     
-    // Find best medoid (copied from original)
+    // Find best medoid - exactly same as original
     uint32_t best_medoid = 0;
     float best_dist = (std::numeric_limits<float>::max)();
     if (!use_filter) {
@@ -178,6 +185,7 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
         if (this->_filter_to_medoid_ids.find(filter_label) != this->_filter_to_medoid_ids.end()) {
             const auto &medoid_ids = this->_filter_to_medoid_ids.at(filter_label);
             for (uint64_t cur_m = 0; cur_m < medoid_ids.size(); cur_m++) {
+                // For filtered index, use PQ distance as approximation - same as original
                 compute_dists(&medoid_ids[cur_m], 1, dist_scratch);
                 float cur_expanded_dist = dist_scratch[0];
                 if (cur_expanded_dist < best_dist) {
@@ -194,9 +202,11 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
     retset.insert(Neighbor(best_medoid, dist_scratch[0]));
     visited.insert(best_medoid);
     
+    uint32_t cmps = 0;
+    uint32_t hops = 0;
     uint32_t num_ios = 0;
     
-    // Main search loop with async IO
+    // Cleared every iteration - same as original
     std::vector<uint32_t> frontier;
     frontier.reserve(2 * beam_width);
     std::vector<std::pair<uint32_t, char *>> frontier_nhoods;
@@ -207,14 +217,14 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
     cached_nhoods.reserve(2 * beam_width);
     
     while (retset.has_unexpanded_node() && num_ios < io_limit) {
-        // Clear iteration state
+        // Clear iteration state - same as original
         frontier.clear();
         frontier_nhoods.clear();
         frontier_read_reqs.clear();
         cached_nhoods.clear();
         sector_scratch_idx = 0;
         
-        // Find new beam
+        // Find new beam - same as original
         uint32_t num_seen = 0;
         while (retset.has_unexpanded_node() && frontier.size() < beam_width && num_seen < beam_width) {
             auto nbr = retset.closest_unexpanded();
@@ -235,10 +245,11 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
             }
         }
         
-        // Prepare async reads for frontier
+        // Read nhoods of frontier ids - ASYNC VERSION
         if (!frontier.empty()) {
-            if (stats != nullptr) stats->n_hops++;
-            
+            if (stats != nullptr) {
+                stats->n_hops++;
+            }
             for (uint64_t i = 0; i < frontier.size(); i++) {
                 auto id = frontier[i];
                 std::pair<uint32_t, char *> fnhood;
@@ -258,15 +269,18 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
                 num_ios++;
             }
             
-            // Perform async reads
+            // Perform async reads - THE MAIN DIFFERENCE FROM ORIGINAL
             io_timer.reset();
-            co_await async_read_frontier_nhoods(frontier_nhoods, frontier_read_reqs, stats);
+            if (!async_reader) {
+                throw std::runtime_error("Async reader not available");
+            }
+            co_await async_reader->async_read_coro(frontier_read_reqs);
             if (stats != nullptr) {
                 stats->io_us += (float)io_timer.elapsed();
             }
         }
         
-        // Process cached neighborhoods (this part remains synchronous)
+        // Process cached nhoods - exactly same as original
         for (auto &cached_nhood : cached_nhoods) {
             auto global_cache_iter = this->_coord_cache.find(cached_nhood.first);
             T *node_fp_coords_copy = global_cache_iter->second;
@@ -286,6 +300,7 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
             uint64_t nnbrs = cached_nhood.second.first;
             uint32_t *node_nbrs = cached_nhood.second.second;
             
+            // Compute node_nbrs <-> query dists in PQ space - same as original
             cpu_timer.reset();
             compute_dists(node_nbrs, nnbrs, dist_scratch);
             if (stats != nullptr) {
@@ -293,6 +308,7 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
                 stats->cpu_us += (float)cpu_timer.elapsed();
             }
             
+            // Process prefetched nhood - same as original
             for (uint64_t m = 0; m < nnbrs; ++m) {
                 uint32_t id = node_nbrs[m];
                 if (visited.insert(id).second) {
@@ -303,6 +319,7 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
                         (!this->_use_universal_label || !this->point_has_label(id, this->_universal_filter_label)))
                         continue;
                     
+                    cmps++;
                     float dist = dist_scratch[m];
                     Neighbor nn(id, dist);
                     retset.insert(nn);
@@ -310,7 +327,7 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
             }
         }
         
-        // Process frontier neighborhoods
+        // Process each frontier nhood - same as original except no USE_BING_INFRA
         for (auto &frontier_nhood : frontier_nhoods) {
             char *node_disk_buf = this->offset_to_node(frontier_nhood.second, frontier_nhood.first);
             uint32_t *node_buf = this->offset_to_node_nhood(node_disk_buf);
@@ -330,8 +347,8 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
             }
             full_retset.push_back(Neighbor(frontier_nhood.first, cur_expanded_dist));
             
-            uint32_t *node_nbrs = node_buf + 1;
-            
+            uint32_t *node_nbrs = (node_buf + 1);
+            // Compute node_nbrs <-> query dist in PQ space - same as original
             cpu_timer.reset();
             compute_dists(node_nbrs, nnbrs, dist_scratch);
             if (stats != nullptr) {
@@ -339,6 +356,8 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
                 stats->cpu_us += (float)cpu_timer.elapsed();
             }
             
+            cpu_timer.reset();
+            // Process prefetched nhood - same as original
             for (uint64_t m = 0; m < nnbrs; ++m) {
                 uint32_t id = node_nbrs[m];
                 if (visited.insert(id).second) {
@@ -349,52 +368,102 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
                         (!this->_use_universal_label || !this->point_has_label(id, this->_universal_filter_label)))
                         continue;
                     
+                    cmps++;
                     float dist = dist_scratch[m];
+                    if (stats != nullptr) {
+                        stats->n_cmps++;
+                    }
+                    
                     Neighbor nn(id, dist);
                     retset.insert(nn);
                 }
             }
+            
+            if (stats != nullptr) {
+                stats->cpu_us += (float)cpu_timer.elapsed();
+            }
+        }
+        
+        hops++;
+    }
+    
+    // Re-sort by distance - same as original
+    std::sort(full_retset.begin(), full_retset.end());
+    
+    if (use_reorder_data) {
+        if (!(this->_reorder_data_exists)) {
+            throw ANNException("Requested use of reordering data which does not exist in index file",
+                             -1, __FUNCSIG__, __FILE__, __LINE__);
+        }
+
+        std::vector<AlignedRead> vec_read_reqs;
+
+        // Limit full_retset size - same as original
+        if (full_retset.size() > k_search * FULL_PRECISION_REORDER_MULTIPLIER) {
+            full_retset.erase(full_retset.begin() + k_search * FULL_PRECISION_REORDER_MULTIPLIER, full_retset.end());
+        }
+
+        for (size_t i = 0; i < full_retset.size(); ++i) {
+            // Use VECTOR_SECTOR_NO macro - same as original
+            vec_read_reqs.emplace_back(
+                VECTOR_SECTOR_NO(full_retset[i].id) * defaults::SECTOR_LEN,
+                defaults::SECTOR_LEN, 
+                sector_scratch + i * defaults::SECTOR_LEN);
+
+            if (stats != nullptr) {
+                stats->n_4k++;
+                stats->n_ios++;
+            }
+        }
+
+        // Perform async reads for reordering data - THE MAIN DIFFERENCE FROM ORIGINAL
+        io_timer.reset();
+        if (!async_reader) {
+            throw std::runtime_error("Async reader not available for reordering");
+        }
+        co_await async_reader->async_read_coro(vec_read_reqs);
+        if (stats != nullptr) {
+            stats->io_us += io_timer.elapsed();
+        }
+
+        // Recompute distances with full precision data - same as original
+        for (size_t i = 0; i < full_retset.size(); ++i) {
+            auto id = full_retset[i].id;
+            // Use VECTOR_SECTOR_OFFSET macro - same as original
+            auto location = (sector_scratch + i * defaults::SECTOR_LEN) + VECTOR_SECTOR_OFFSET(id);
+            full_retset[i].distance = this->_dist_cmp->compare(aligned_query_T, (T *)location, (uint32_t)this->_data_dim);
+        }
+
+        // Re-sort with new distances - same as original
+        std::sort(full_retset.begin(), full_retset.end());
+    }
+
+    // Copy k_search values - same as original (always executed, not in else branch)
+    for (uint64_t i = 0; i < k_search; i++) {
+        indices[i] = full_retset[i].id;
+        auto key = (uint32_t)indices[i];
+        if (this->_dummy_pts.find(key) != this->_dummy_pts.end()) {
+            indices[i] = this->_dummy_to_real_map[key];
+        }
+
+        if (distances != nullptr) {
+            distances[i] = full_retset[i].distance;
+            if (this->metric == diskann::Metric::INNER_PRODUCT) {
+                // Flip the sign to convert min to max - same as original
+                distances[i] = (-distances[i]);
+                // Rescale to revert back to original norms - same as original
+                if (this->_max_base_norm != 0)
+                    distances[i] *= (this->_max_base_norm * query_norm);
+            }
         }
     }
     
-    // Extract top-k results (same as original)
-    size_t pos = 0;
-    for (size_t i = 0; i < l_search && i < retset.size() && pos < k_search; i++) {
-        if (!use_filter && this->_dummy_pts.find(retset[i].id) != this->_dummy_pts.end()) {
-            continue;
-        }
-        if (use_filter && !(this->point_has_label(retset[i].id, filter_label)) &&
-            (!this->_use_universal_label || !this->point_has_label(retset[i].id, this->_universal_filter_label))) {
-            continue;
-        }
-        indices[pos] = retset[i].id;
-        distances[pos] = retset[i].distance;
-        pos++;
-    }
-    
-    // Handle reordering if needed
-    if (use_reorder_data && pos > 0) {
-        // Reordering logic (simplified - would need full implementation)
-        diskann::cout << "Reordering not yet implemented in async version" << std::endl;
+    if (stats != nullptr) {
+        stats->total_us = (float)query_timer.elapsed();
     }
     
     co_return;
 }
-
-template <typename T, typename LabelT>
-Task<void> AsyncPQFlashIndex<T, LabelT>::async_read_frontier_nhoods(
-    std::vector<std::pair<uint32_t, char *>> &frontier_nhoods,
-    std::vector<AlignedRead> &frontier_read_reqs,
-    QueryStats *stats) {
-    
-    if (!async_reader) {
-        throw std::runtime_error("Async reader not available");
-    }
-    
-    // Use the async reader to perform all reads concurrently
-    co_await async_reader->async_read_coro(frontier_read_reqs);
-}
-
 // Explicit template instantiations
 template class AsyncPQFlashIndex<float>;
 template class AsyncPQFlashIndex<int8_t>;

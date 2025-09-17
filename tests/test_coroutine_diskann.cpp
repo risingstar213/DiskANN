@@ -164,8 +164,7 @@ int main() {
     std::cout << "Starting DiskANN Coroutine Tests" << std::endl;
     
     // Initialize scheduler
-    diskann::g_scheduler = std::make_unique<diskann::CoroutineScheduler>();
-    diskann::g_scheduler->init();
+    diskann::init_scheduler();
     
     std::cout << "Scheduler initialized" << std::endl;
     
@@ -176,8 +175,8 @@ int main() {
     auto test2 = test_concurrent_reads();
     
     // Schedule tests
-    diskann::get_scheduler().schedule_coroutine(test1.coro);
-    diskann::get_scheduler().schedule_coroutine(test2.coro);
+    diskann::get_cor_scheduler()->schedule_coroutine(test1.coro);
+    diskann::get_cor_scheduler()->schedule_coroutine(test2.coro);
     
     // Run scheduler in separate thread
     std::thread scheduler_thread([&]() {
