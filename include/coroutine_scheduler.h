@@ -10,7 +10,7 @@
 #include <thread>
 #include <atomic>
 #include <stdexcept>
-#include <liburing.h>
+#include "io_ring_wrapper.h"
 #include <vector>
 #include <unordered_map>
 #include "aligned_file_reader.h"
@@ -178,39 +178,39 @@ struct IOAwaitable {
 class CoroutineScheduler {
 public:
     static constexpr size_t MAX_ENTRIES = 1024;
-    
+
     CoroutineScheduler();
     ~CoroutineScheduler();
-    
+
     // Initialize the scheduler
     void init();
-    
+
     // Run the event loop
     void run();
-    
+
     // Stop the scheduler
     void stop();
-    
+
     // Schedule an async read operation
     IOAwaitable async_read(int fd, void* buf, size_t len, off_t offset);
-    
+
     // Schedule multiple async read operations
     std::vector<IOAwaitable> async_read_batch(
-        int fd, 
+        int fd,
         const std::vector<AlignedRead>& reads
     );
-    
+
     // Add a coroutine to the ready queue
     void schedule_coroutine(std::coroutine_handle<> coro);
-    
+
 private:
-    struct io_uring ring;
+    IoRingWrapper ring_wrapper_;
     std::atomic<bool> running{false};
     std::queue<std::coroutine_handle<>> ready_queue;
     std::unordered_map<uint64_t, IOAwaitable*> pending_ops;
     std::mutex ready_mutex;
     uint64_t next_op_id = 1;
-    
+
     void process_completions();
     void execute_ready_coroutines();
 };

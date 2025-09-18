@@ -50,6 +50,7 @@ else()
             coroutine_scheduler.cpp
             async_linux_aligned_file_reader.cpp
             async_pq_flash_index.cpp
+            io_ring_wrapper.cpp
         )
     endif()
     
