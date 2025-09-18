@@ -28,6 +28,7 @@
 #endif
 
 #define WARMUP false
+#define COROUTINES_PER_THREAD 15
 
 namespace po = boost::program_options;
 
@@ -120,7 +121,7 @@ int async_search_disk_index(diskann::Metric &metric, const std::string &index_pa
     std::shared_ptr<AlignedFileReader> reader = std::make_shared<AsyncLinuxAlignedFileReader>();
     auto _pFlashIndex = std::make_shared<diskann::AsyncPQFlashIndex<T, LabelT>>(reader, metric);
 
-    int res = _pFlashIndex->load(num_threads, index_path_prefix.c_str());
+    int res = _pFlashIndex->load(num_threads, index_path_prefix.c_str(), COROUTINES_PER_THREAD);
     if (res != 0)
     {
         return res;
@@ -261,7 +262,11 @@ int async_search_disk_index(diskann::Metric &metric, const std::string &index_pa
             // 运行所有协程任务
             for (uint32_t i = 0; i < search_tasks.size(); i++) {
                 scheduler->schedule_coroutine(search_tasks[i].coro);
-                scheduler->run(); // 每100个任务运行一次调度器
+                if (i % COROUTINES_PER_THREAD == (COROUTINES_PER_THREAD - 1) || i == search_tasks.size() - 1) {
+                    // 每10个任务运行一次调度器
+                    scheduler->run();
+                    printf("Progress: %.2f%%\r", (i + 1) * 100.0 / search_tasks.size());
+                }
             }
         } catch (const std::exception& e) {
             diskann::cout << "Search failed: " << e.what() << std::endl;

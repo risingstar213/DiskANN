@@ -43,7 +43,7 @@ void CoroutineScheduler::run() {
             if (pending_ops.empty()) {
                 break; // Exit if no pending operations and no ready coroutines
             }
-            std::this_thread::sleep_for(std::chrono::microseconds(1));
+            // std::this_thread::sleep_for(std::chrono::microseconds(1));
         }
     }
 }
@@ -105,7 +105,7 @@ std::vector<IOAwaitable> CoroutineScheduler::async_read_batch(
 }
 
 void CoroutineScheduler::schedule_coroutine(std::coroutine_handle<> coro) {
-    std::lock_guard<std::mutex> lock(ready_mutex);
+    // std::lock_guard<std::mutex> lock(ready_mutex);
     ready_queue.push(coro);
 }
 
@@ -139,9 +139,9 @@ void CoroutineScheduler::process_completions() {
 }
 
 void CoroutineScheduler::execute_ready_coroutines() {
-    std::lock_guard<std::mutex> lock(ready_mutex);
+    // std::lock_guard<std::mutex> lock(ready_mutex);
     
-    while (!ready_queue.empty()) {
+    if (!ready_queue.empty()) {
         auto coro = ready_queue.front();
         ready_queue.pop();
         

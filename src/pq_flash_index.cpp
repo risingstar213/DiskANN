@@ -122,7 +122,7 @@ template <typename T, typename LabelT> inline T *PQFlashIndex<T, LabelT>::offset
 }
 
 template <typename T, typename LabelT>
-void PQFlashIndex<T, LabelT>::setup_thread_data(uint64_t nthreads, uint64_t visited_reserve)
+void PQFlashIndex<T, LabelT>::setup_thread_data(uint64_t nthreads, uint64_t coroutines_per_thread, uint64_t visited_reserve)
 {
     diskann::cout << "Setting up thread-specific contexts for nthreads: " << nthreads << std::endl;
 // omp parallel for to generate unique thread IDs
@@ -131,10 +131,13 @@ void PQFlashIndex<T, LabelT>::setup_thread_data(uint64_t nthreads, uint64_t visi
     {
 #pragma omp critical
         {
-            SSDThreadData<T> *data = new SSDThreadData<T>(this->_aligned_dim, visited_reserve);
             this->reader->register_thread();
-            data->ctx = this->reader->get_ctx();
-            this->_thread_data.push(data);
+            for (uint64_t c = 0; c < coroutines_per_thread; c++)
+            {
+                SSDThreadData<T> *data = new SSDThreadData<T>(this->_aligned_dim, visited_reserve);
+                data->ctx = this->reader->get_ctx();
+                this->_thread_data.push(data);
+            }
         }
     }
     _load_flag = true;
@@ -741,7 +744,7 @@ template <typename T, typename LabelT>
 int PQFlashIndex<T, LabelT>::load(MemoryMappedFiles &files, uint32_t num_threads, const char *index_prefix)
 {
 #else
-template <typename T, typename LabelT> int PQFlashIndex<T, LabelT>::load(uint32_t num_threads, const char *index_prefix)
+template <typename T, typename LabelT> int PQFlashIndex<T, LabelT>::load(uint32_t num_threads, const char *index_prefix, uint32_t coroutines_per_thread)
 {
 #endif
     std::string pq_table_bin = std::string(index_prefix) + "_pq_pivots.bin";
@@ -751,7 +754,7 @@ template <typename T, typename LabelT> int PQFlashIndex<T, LabelT>::load(uint32_
     return load_from_separate_paths(files, num_threads, _disk_index_file.c_str(), pq_table_bin.c_str(),
                                     pq_compressed_vectors.c_str());
 #else
-    return load_from_separate_paths(num_threads, _disk_index_file.c_str(), pq_table_bin.c_str(),
+    return load_from_separate_paths(num_threads, coroutines_per_thread, _disk_index_file.c_str(), pq_table_bin.c_str(),
                                     pq_compressed_vectors.c_str());
 #endif
 }
@@ -764,7 +767,7 @@ int PQFlashIndex<T, LabelT>::load_from_separate_paths(diskann::MemoryMappedFiles
 {
 #else
 template <typename T, typename LabelT>
-int PQFlashIndex<T, LabelT>::load_from_separate_paths(uint32_t num_threads, const char *index_filepath,
+int PQFlashIndex<T, LabelT>::load_from_separate_paths(uint32_t num_threads, uint32_t coroutines_per_thread, const char *index_filepath,
                                                       const char *pivots_filepath, const char *compressed_filepath)
 {
 #endif
@@ -1083,7 +1086,7 @@ int PQFlashIndex<T, LabelT>::load_from_separate_paths(uint32_t num_threads, cons
     // open AlignedFileReader handle to index_file
     std::string index_fname(_disk_index_file);
     reader->open(index_fname);
-    this->setup_thread_data(num_threads);
+    this->setup_thread_data(num_threads, coroutines_per_thread);
     this->_max_nthreads = num_threads;
 
 #endif

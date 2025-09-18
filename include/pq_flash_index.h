@@ -35,7 +35,7 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
     DISKANN_DLLEXPORT int load(diskann::MemoryMappedFiles &files, uint32_t num_threads, const char *index_prefix);
 #else
     // load compressed data, and obtains the handle to the disk-resident index
-    DISKANN_DLLEXPORT int load(uint32_t num_threads, const char *index_prefix);
+    DISKANN_DLLEXPORT int load(uint32_t num_threads, const char *index_prefix, uint32_t coroutines_per_thread = 1);
 #endif
 
 #ifdef EXEC_ENV_OLS
@@ -43,7 +43,7 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
                                                    const char *index_filepath, const char *pivots_filepath,
                                                    const char *compressed_filepath);
 #else
-    DISKANN_DLLEXPORT int load_from_separate_paths(uint32_t num_threads, const char *index_filepath,
+    DISKANN_DLLEXPORT int load_from_separate_paths(uint32_t num_threads, uint32_t coroutines_per_thread, const char *index_filepath,
                                                    const char *pivots_filepath, const char *compressed_filepath);
 #endif
 
@@ -113,7 +113,7 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
 
   protected:
     DISKANN_DLLEXPORT void use_medoids_data_as_centroids();
-    DISKANN_DLLEXPORT void setup_thread_data(uint64_t nthreads, uint64_t visited_reserve = 4096);
+    DISKANN_DLLEXPORT void setup_thread_data(uint64_t nthreads, uint64_t coroutines_per_thread = 1, uint64_t visited_reserve = 4096);
 
     DISKANN_DLLEXPORT void set_universal_label(const LabelT &label);
 
