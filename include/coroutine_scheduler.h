@@ -207,9 +207,8 @@ private:
     IoRingWrapper ring_wrapper_;
     std::atomic<bool> running{false};
     std::queue<std::coroutine_handle<>> ready_queue;
-    std::unordered_map<uint64_t, IOAwaitable*> pending_ops;
+    std::unordered_map<uint64_t, std::vector<IOAwaitable*> > pending_ops;
     std::mutex ready_mutex;
-    uint64_t next_op_id = 1;
 
     void process_completions();
     void execute_ready_coroutines();

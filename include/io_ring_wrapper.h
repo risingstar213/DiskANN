@@ -22,13 +22,14 @@ public:
     void prep_read(struct io_uring_sqe* sqe, int fd, void* buf, size_t len, off_t offset);
 
     // 批量read相关接口 - 支持多协程共享batch，但IOAwaitable私有
-    void add_read_request(int fd, void* buf, size_t len, off_t offset, uint64_t op_id);
+    uint64_t add_read_request(int fd, void* buf, size_t len, off_t offset);
     void flush_batch(); // 提交所有pending的read请求
     size_t pending_requests_count() const;
     void clear_batch();
 
 private:
     struct io_uring ring_;
+    uint64_t next_op_id = 1;
     
     struct PendingRead {
         int fd;

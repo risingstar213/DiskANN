@@ -68,14 +68,17 @@ std::vector<IOAwaitable> CoroutineScheduler::async_read_batch(
     
     // 为每个read创建私有的awaitable和op_id
     for (size_t i = 0; i < reads.size(); ++i) {
-        uint64_t op_id = next_op_id++;
         awaitables.emplace_back(nullptr);
         awaitables.back().result = 0;
         awaitables.back().ready = false;
-        pending_ops[op_id] = &awaitables.back();
         
         // 将请求添加到共享batch中，而不是立即提交
-        ring_wrapper_.add_read_request(fd, reads[i].buf, reads[i].len, reads[i].offset, op_id);
+        uint64_t op_id = ring_wrapper_.add_read_request(fd, reads[i].buf, reads[i].len, reads[i].offset);
+
+        if (pending_ops.find(op_id) == pending_ops.end()) {
+            pending_ops[op_id] = std::vector<IOAwaitable*>();
+        }
+        pending_ops[op_id].push_back(&awaitables.back());
     }
 
     ring_wrapper_.flush_batch();
@@ -102,11 +105,12 @@ void CoroutineScheduler::process_completions() {
         int result = cqe->res;
         auto it = pending_ops.find(op_id);
         if (it != pending_ops.end()) {
-            IOAwaitable* awaitable = it->second;
-            awaitable->result = result;
-            awaitable->ready = true;
-            if (awaitable->waiting_coroutine) {
-                schedule_coroutine(awaitable->waiting_coroutine);
+            for (auto awaitable_ptr : it->second) {
+                awaitable_ptr->result = result;
+                awaitable_ptr->ready = true;
+                if (awaitable_ptr->waiting_coroutine) {
+                    schedule_coroutine(awaitable_ptr->waiting_coroutine);
+                }
             }
             pending_ops.erase(it);
         }
