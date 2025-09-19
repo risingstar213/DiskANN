@@ -26,6 +26,9 @@ public:
     void flush_batch(); // 提交所有pending的read请求
     size_t pending_requests_count() const;
     void clear_batch();
+    
+    // 检查是否启用了HITCHHIKE模式
+    bool is_hitchhike_enabled() const;
 
 private:
     struct io_uring ring_;

@@ -208,6 +208,7 @@ private:
     std::atomic<bool> running{false};
     std::queue<std::coroutine_handle<>> ready_queue;
     std::unordered_map<uint64_t, std::vector<IOAwaitable*> > pending_ops;
+    std::unordered_map<uint64_t, size_t> pending_counts;  // 跟踪每个op_id的待完成数量
     std::mutex ready_mutex;
 
     void process_completions();

@@ -43,9 +43,7 @@ void IoRingWrapper::prep_read(struct io_uring_sqe* sqe, int fd, void* buf, size_
 
 uint64_t IoRingWrapper::add_read_request(int fd, void* buf, size_t len, off_t offset) {
     uint64_t current_op_id = next_op_id;
-#ifndef ENABLE_HITCHHIKE
-    next_op_id++;
-#endif
+    // 不管是否启用HITCHHIKE，都使用粗粒度收割：所有请求共享同一个op_id
     pending_reads_.push_back(PendingRead{fd, buf, len, offset, current_op_id});
     return current_op_id;
 }
@@ -54,6 +52,9 @@ void IoRingWrapper::flush_batch() {
     if (pending_reads_.empty()) return;
 
     assert(pending_reads_.size() < 96); // sanity check
+
+    // 粗粒度收割：无论是否启用HITCHHIKE，都使用共享的op_id
+    uint64_t batch_op_id = next_op_id++;
 
 #ifdef ENABLE_HITCHHIKE
     struct io_uring_sqe* sqe = get_sqe();
@@ -68,7 +69,7 @@ void IoRingWrapper::flush_batch() {
     // 只提交第一个请求，其他的通过Hitchhike传递
     PendingRead* req = &pending_reads_[0];
     io_uring_prep_read(sqe, req->fd, req->buf, 4096, req->offset);
-    sqe->user_data = next_op_id++;
+    sqe->user_data = batch_op_id;  // 使用共享的batch_op_id
 
     if (pending_reads_.size() > 1) {
         struct hitchhiker* hit = &ring_.hites[sqe_index];
@@ -83,12 +84,13 @@ void IoRingWrapper::flush_batch() {
         sqe->flags |= IOSQE_HIT; // 标记为Hitchhike请求
     }
 #else
+    // 非HITCHHIKE路径：也使用粗粒度收割（所有请求共享同一个op_id）
     for (const auto& req : pending_reads_) {
         struct io_uring_sqe* sqe = get_sqe();
         if (!sqe) throw std::runtime_error("Failed to get SQE for read");
         
         io_uring_prep_read(sqe, req.fd, req.buf, req.len, req.offset);
-        sqe->user_data = req.op_id;
+        sqe->user_data = batch_op_id;  // 所有SQE使用相同的batch_op_id
     }
 #endif
     submit();
@@ -101,4 +103,12 @@ size_t IoRingWrapper::pending_requests_count() const {
 
 void IoRingWrapper::clear_batch() {
     pending_reads_.clear();
+}
+
+bool IoRingWrapper::is_hitchhike_enabled() const {
+#ifdef ENABLE_HITCHHIKE
+    return true;
+#else
+    return false;
+#endif
 }
