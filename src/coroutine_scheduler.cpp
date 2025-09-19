@@ -14,7 +14,7 @@ namespace diskann {
 thread_local std::unique_ptr<CoroutineScheduler> g_scheduler;
 
 
-CoroutineScheduler::CoroutineScheduler() : ring_wrapper_(MAX_ENTRIES, IORING_SETUP_SQPOLL) {
+CoroutineScheduler::CoroutineScheduler() : ring_wrapper_(MAX_ENTRIES, 0) {
 }
 
 
@@ -29,7 +29,6 @@ void CoroutineScheduler::init() {
 
 void CoroutineScheduler::run() {
     running = true;
-    int loop_cnt = 0;
 
     while (running) {
         // Process IO completions
@@ -47,12 +46,11 @@ void CoroutineScheduler::run() {
         }
 
         // Periodically flush batched reads - 共享batch提交
-        // if (loop_cnt % 8 == 0 || ready_queue.empty()) {
-        //     if (ring_wrapper_.pending_requests_count() > 0) {
-        //         ring_wrapper_.flush_batch();
-        //     }
-        // }
-        ++loop_cnt;
+        if (ring_wrapper_.pending_requests_count() >= 16 || ready_queue.empty()) {
+            if (ring_wrapper_.pending_requests_count() > 0) {
+                ring_wrapper_.flush_batch();
+            }
+        }
     }
 }
 
@@ -77,11 +75,12 @@ std::vector<IOAwaitable> CoroutineScheduler::async_read_batch(
 
         if (pending_ops.find(op_id) == pending_ops.end()) {
             pending_ops[op_id] = std::vector<IOAwaitable*>();
+            pending_ops[op_id].reserve(32); // 预留空间，减少扩容
         }
         pending_ops[op_id].push_back(&awaitables.back());
     }
 
-    ring_wrapper_.flush_batch();
+    // ring_wrapper_.flush_batch();
     
     // 如果batch足够大，立即flush；否则等待周期性flush
     // const size_t BATCH_FLUSH_THRESHOLD = 16;

@@ -62,19 +62,24 @@ void IoRingWrapper::flush_batch() {
         printf("ring_.hites is null\n");
         throw std::runtime_error("Hitchhike not initialized in io_uring");
     }
-    struct hitchhiker* hit = &ring_.hites[sqe_index];
-    hit->max = pending_reads_.size() - 1;
-    hit->in_use = 1;
-    hit->size = 4096; // page size
-    for (uint32_t i = 1; i < pending_reads_.size(); ++i) {
-        hit->addr[i-1] = (uint64_t)pending_reads_[i].offset;
-    }
+    // reverse
+    // std::reverse(pending_reads_.begin(), pending_reads_.end());
 
     // 只提交第一个请求，其他的通过Hitchhike传递
     PendingRead* req = &pending_reads_[0];
     io_uring_prep_read(sqe, req->fd, req->buf, 4096, req->offset);
     sqe->user_data = next_op_id++;
+
     if (pending_reads_.size() > 1) {
+        struct hitchhiker* hit = &ring_.hites[sqe_index];
+        hit->max = pending_reads_.size() - 2;
+        hit->in_use = 1;
+        hit->iov_use = 1;
+        hit->size = 4096; // page size
+        for (uint32_t i = 1; i < pending_reads_.size(); ++i) {
+            hit->addr[i-1] = (uint64_t)pending_reads_[i].offset;
+            hit->iov[i-1] = (uint64_t)pending_reads_[i].buf;
+        }
         sqe->flags |= IOSQE_HIT; // 标记为Hitchhike请求
     }
 #else

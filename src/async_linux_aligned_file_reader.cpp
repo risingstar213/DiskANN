@@ -112,23 +112,23 @@ diskann::Task<void> AsyncLinuxAlignedFileReader::async_read_coro(std::vector<Ali
             throw std::runtime_error("Read request not properly aligned");
         }
         // 暂时用来调 bug，一个个下发IO请求，并同步等待返回
-        std::vector<diskann::IOAwaitable> awaitables = scheduler->async_read_batch(file_desc, std::vector<AlignedRead>{req});
-        int result = co_await awaitables[0];
-        if (result < 0) {
-            throw std::runtime_error("Async read failed with error: " + std::to_string(-result));
-        } 
+        // std::vector<diskann::IOAwaitable> awaitables = scheduler->async_read_batch(file_desc, std::vector<AlignedRead>{req});
+        // int result = co_await awaitables[0];
+        // if (result < 0) {
+        //     throw std::runtime_error("Async read failed with error: " + std::to_string(-result));
+        // } 
     }
     
-    // // Submit all reads asynchronously
-    // std::vector<diskann::IOAwaitable> awaitables = scheduler->async_read_batch(file_desc, read_reqs);
+    // Submit all reads asynchronously
+    std::vector<diskann::IOAwaitable> awaitables = scheduler->async_read_batch(file_desc, read_reqs);
     
-    // // Wait for all reads to complete
-    // for (auto &awaitable : awaitables) {
-    //     int result = co_await awaitable;
-    //     if (result < 0) {
-    //         throw std::runtime_error("Async read failed with error: " + std::to_string(-result));
-    //     }
-    // }
+    // Wait for all reads to complete
+    for (auto &awaitable : awaitables) {
+        int result = co_await awaitable;
+        if (result < 0) {
+            throw std::runtime_error("Async read failed with error: " + std::to_string(-result));
+        }
+    }
     
     co_return;
 }
