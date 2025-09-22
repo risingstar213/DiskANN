@@ -8,13 +8,18 @@
 #include <cstring>
 #include <chrono>
 #include "io_ring_wrapper.h"
+#include "libaio_wrapper.h"
+#include "async_io.h"
 
 namespace diskann {
 
 thread_local std::unique_ptr<CoroutineScheduler> g_scheduler;
 
 
-CoroutineScheduler::CoroutineScheduler() : ring_wrapper_(MAX_ENTRIES, 0) {
+CoroutineScheduler::CoroutineScheduler() {
+    // Default backend: io_uring
+    io_backend_ = std::make_unique<IoRingWrapper>(MAX_ENTRIES, 0);
+    // io_backend_ = std::make_unique<LibAioWrapper>(MAX_ENTRIES);
 }
 
 
@@ -38,17 +43,16 @@ void CoroutineScheduler::run() {
         execute_ready_coroutines();
 
         // Small yield to prevent busy waiting
-        if (ready_queue.empty()) {
-            if (pending_ops.empty()) {
+        if (ready_queue_.empty()) {
+            if (pending_ops_.empty()) {
                 break; // Exit if no pending operations and no ready coroutines
             }
-            // std::this_thread::sleep_for(std::chrono::microseconds(1));
         }
 
         // Periodically flush batched reads - 共享batch提交
-        if (ring_wrapper_.pending_requests_count() >= 64 || ready_queue.empty()) {
-            if (ring_wrapper_.pending_requests_count() > 0) {
-                ring_wrapper_.flush_batch();
+        if (io_backend_->pending_requests_count() >= 64 || ready_queue_.empty()) {
+            if (io_backend_->pending_requests_count() > 0) {
+                io_backend_->flush_batch();
             }
         }
     }
@@ -56,34 +60,6 @@ void CoroutineScheduler::run() {
 
 void CoroutineScheduler::stop() {
     running = false;
-}
-
-IOAwaitable CoroutineScheduler::async_read(int fd, void* buf, size_t len, off_t offset) {
-    IOAwaitable awaitable(nullptr);
-    awaitable.result = 0;
-    awaitable.ready = false;
-    
-    // 将单个请求添加到batch中，获取共享的op_id
-    uint64_t op_id = ring_wrapper_.add_read_request(fd, buf, len, offset);
-    
-    // 将awaitable关联到op_id
-    if (pending_ops.find(op_id) == pending_ops.end()) {
-        pending_ops[op_id] = std::vector<IOAwaitable*>();
-        pending_counts[op_id] = 0;  // 初始化计数器
-    }
-    pending_ops[op_id].push_back(&awaitable);
-    
-    // 累加计数器：每个awaitable在非HITCHHIKE模式下需要1个完成通知
-    if (!ring_wrapper_.is_hitchhike_enabled()) {
-        pending_counts[op_id]++;  // 非HITCHHIKE模式：每个awaitable累加1个完成通知
-    } else {
-        // HITCHHIKE模式：第一次设置为1，后续不增加（因为所有awaitable共享1个完成通知）
-        if (pending_counts[op_id] == 0) {
-            pending_counts[op_id] = 1;
-        }
-    }
-    
-    return awaitable;
 }
 
 std::vector<IOAwaitable> CoroutineScheduler::async_read_batch(
@@ -100,110 +76,77 @@ std::vector<IOAwaitable> CoroutineScheduler::async_read_batch(
     }
     
     // 粗粒度收割：所有请求共享一个op_id
-    uint64_t shared_op_id = 0;
     for (size_t i = 0; i < reads.size(); ++i) {
-        // 将请求添加到共享batch中，所有请求都会返回相同的op_id
-        uint64_t op_id = ring_wrapper_.add_read_request(fd, reads[i].buf, reads[i].len, reads[i].offset);
-        if (i == 0) {
-            shared_op_id = op_id;  // 记录共享的op_id
-        }
-    }
-    
-    // 将所有awaitables关联到共享的op_id
-    if (pending_ops.find(shared_op_id) == pending_ops.end()) {
-        pending_ops[shared_op_id] = std::vector<IOAwaitable*>();
-        pending_ops[shared_op_id].reserve(64);
-        pending_counts[shared_op_id] = 0;  // 初始化计数器
-    }
-    
-    for (auto& awaitable : awaitables) {
-        pending_ops[shared_op_id].push_back(&awaitable);
-    }
-    
-    // 累加计数器：考虑到可能有多个批次共用同一个op_id
-    if (!ring_wrapper_.is_hitchhike_enabled()) {
-        pending_counts[shared_op_id] += reads.size();  // 非HITCHHIKE模式：累加每个请求的完成通知
-    } else {
-        // HITCHHIKE模式：第一次设置为1，后续不增加（因为所有awaitable共享1个完成通知）
-        if (pending_counts[shared_op_id] == 0) {
-            pending_counts[shared_op_id] = 1;
+        uint64_t op_id = io_backend_->add_read_request(fd, reads[i].buf, reads[i].len, reads[i].offset);
+
+        auto &entry = pending_ops_[op_id];
+        if (entry.awaitables.empty()) entry.awaitables.reserve(64);
+        entry.awaitables.push_back(&awaitables[i]);
+
+#if !defined(ENABLE_HITCHHIKE)
+        entry.remaining += 1;  // 非HITCHHIKE模式：每个请求都增加计数
+#else
+        if (entry.remaining == 0) entry.remaining = 1; // HITCHHIKE: single completion
+#endif
+
+        if (entry.awaitables.size() >= 120) {
+            io_backend_->flush_batch(); // 防止计数过大
         }
     }
 
-    // ring_wrapper_.flush_batch();
-    
-    // 如果batch足够大，立即flush；否则等待周期性flush
-    // const size_t BATCH_FLUSH_THRESHOLD = 16;
-    // if (ring_wrapper_.pending_requests_count() >= BATCH_FLUSH_THRESHOLD) {
-    //     ring_wrapper_.flush_batch();
-    // }
+    // io_backend_ flush deferred to scheduler loop
     
     return awaitables;
 }
 
 void CoroutineScheduler::schedule_coroutine(std::coroutine_handle<> coro) {
-    // std::lock_guard<std::mutex> lock(ready_mutex);
-    ready_queue.push(coro);
+    // std::lock_guard<std::mutex> lock(ready_mutex_);
+    ready_queue_.push(coro);
 }
 
 void CoroutineScheduler::process_completions() {
-    struct io_uring_cqe* cqe;
-    int ret;
-    while ((ret = ring_wrapper_.peek_cqe(&cqe)) == 0) {
-        uint64_t op_id = cqe->user_data;
-        int result = cqe->res;
-        auto it = pending_ops.find(op_id);
-        if (it != pending_ops.end()) {
-            std::vector<IOAwaitable*>& awaitables = it->second;
-            auto count_it = pending_counts.find(op_id);
-            
-            if (count_it == pending_counts.end()) {
-                std::cerr << "Error: No pending count found for op_id: " << op_id << std::endl;
-                ring_wrapper_.cqe_seen(cqe);
-                continue;
+    // Poll completions from backend
+    auto completions = io_backend_->poll_completions(128);
+    for (const auto &ac : completions) {
+        uint64_t op_id = ac.op_id;
+        int result = ac.result;
+        auto it = pending_ops_.find(op_id);
+        if (it != pending_ops_.end()) {
+            auto &entry = it->second;
+#ifdef ENABLE_HITCHHIKE
+            for (auto awaitable_ptr : entry.awaitables) {
+                awaitable_ptr->result = result;
+                awaitable_ptr->ready = true;
+                if (awaitable_ptr->waiting_coroutine) {
+                    schedule_coroutine(awaitable_ptr->waiting_coroutine);
+                }
             }
-            
-            if (ring_wrapper_.is_hitchhike_enabled()) {
-                // HITCHHIKE模式：一个CQE完成所有相关的awaitables
-                for (auto awaitable_ptr : awaitables) {
-                    awaitable_ptr->result = result;
+            pending_ops_.erase(it);
+#else
+            if (entry.remaining > 0) {
+                entry.remaining--; // 减少待完成计数
+            }
+            if (entry.remaining == 0) {
+                for (auto awaitable_ptr : entry.awaitables) {
+                    awaitable_ptr->result = result;  // 所有awaitable使用最后一个result
                     awaitable_ptr->ready = true;
                     if (awaitable_ptr->waiting_coroutine) {
                         schedule_coroutine(awaitable_ptr->waiting_coroutine);
                     }
                 }
-                // 立即删除，因为所有awaitables都已完成
-                pending_ops.erase(it);
-                pending_counts.erase(count_it);
-            } else {
-                // 非HITCHHIKE模式：只需要递减计数器，在全部完成时统一唤醒
-                size_t& remaining_count = count_it->second;
-                remaining_count--; // 减少待完成计数
-                
-                // 当所有IO都完成时，统一设置所有awaitables并唤醒协程（O(1)判断 + 批量处理）
-                if (remaining_count == 0) {
-                    for (auto awaitable_ptr : awaitables) {
-                        awaitable_ptr->result = result;  // 所有awaitable使用最后一个result
-                        awaitable_ptr->ready = true;
-                        if (awaitable_ptr->waiting_coroutine) {
-                            schedule_coroutine(awaitable_ptr->waiting_coroutine);
-                        }
-                    }
-                    pending_ops.erase(it);
-                    pending_counts.erase(count_it);
-                }
+                pending_ops_.erase(it);
             }
+#endif
         }
-        ring_wrapper_.cqe_seen(cqe);
     }
 }
 
 void CoroutineScheduler::execute_ready_coroutines() {
     // std::lock_guard<std::mutex> lock(ready_mutex);
     
-    if (!ready_queue.empty()) {
-        auto coro = ready_queue.front();
-        ready_queue.pop();
+    if (!ready_queue_.empty()) {
+        auto coro = ready_queue_.front();
+        ready_queue_.pop();
         
         // Resume the coroutine
         if (coro && !coro.done()) {

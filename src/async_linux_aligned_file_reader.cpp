@@ -111,12 +111,6 @@ diskann::Task<void> AsyncLinuxAlignedFileReader::async_read_coro(std::vector<Ali
         if (!IS_ALIGNED(req.len, 512) || !IS_ALIGNED(req.offset, 512) || !IS_ALIGNED(req.buf, 512)) {
             throw std::runtime_error("Read request not properly aligned");
         }
-        // 暂时用来调 bug，一个个下发IO请求，并同步等待返回
-        // std::vector<diskann::IOAwaitable> awaitables = scheduler->async_read_batch(file_desc, std::vector<AlignedRead>{req});
-        // int result = co_await awaitables[0];
-        // if (result < 0) {
-        //     throw std::runtime_error("Async read failed with error: " + std::to_string(-result));
-        // } 
     }
     
     // Submit all reads asynchronously

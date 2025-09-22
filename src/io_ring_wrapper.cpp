@@ -1,8 +1,7 @@
 #include <liburing.h>
 #include "io_ring_wrapper.h"
 #include "aligned_file_reader.h" // for AlignedRead
-
-#define ENABLE_HITCHHIKE
+#include "async_io.h"
 
 IoRingWrapper::IoRingWrapper(unsigned entries, unsigned flags) {
 #ifdef ENABLE_HITCHHIKE
@@ -51,7 +50,10 @@ uint64_t IoRingWrapper::add_read_request(int fd, void* buf, size_t len, off_t of
 void IoRingWrapper::flush_batch() {
     if (pending_reads_.empty()) return;
 
-    assert(pending_reads_.size() < 96); // sanity check
+    if (uring_unlikely(pending_reads_.size() >= 125)) { // sanity check
+        printf("Too many pending reads in batch: %zu\n", pending_reads_.size());
+        throw std::runtime_error("Too many pending reads in batch (>96), likely a bug");
+    }
 
     // 粗粒度收割：无论是否启用HITCHHIKE，都使用共享的op_id
     uint64_t batch_op_id = next_op_id++;
@@ -105,10 +107,27 @@ void IoRingWrapper::clear_batch() {
     pending_reads_.clear();
 }
 
-bool IoRingWrapper::is_hitchhike_enabled() const {
-#ifdef ENABLE_HITCHHIKE
-    return true;
-#else
-    return false;
-#endif
+std::vector<AsyncCompletion> IoRingWrapper::poll_completions(int max_events) {
+    std::vector<AsyncCompletion> out;
+    out.reserve(max_events);
+    struct io_uring_cqe* cqe = nullptr;
+    int got = 0;
+    while (got < max_events) {
+        int ret = peek_cqe(&cqe);
+        if (ret != 0 || cqe == nullptr) break;
+        AsyncCompletion ac;
+        ac.op_id = cqe->user_data;
+        ac.result = cqe->res;
+        out.push_back(ac);
+        cqe = nullptr; // reset
+        got++;
+        // don't call cqe_seen here; leave caller to signal seen after processing
+        // but to mirror previous behavior we will mark seen in this adapter
+        // to keep semantics simple.
+        struct io_uring_cqe* seen_cqe;
+        if (peek_cqe(&seen_cqe) == 0 && seen_cqe) {
+            cqe_seen(seen_cqe);
+        }
+    }
+    return out;
 }

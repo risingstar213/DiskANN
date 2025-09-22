@@ -4,12 +4,14 @@
 #include <liburing.h>
 #include <stdexcept>
 #include <vector>
+#include <sys/types.h>
+#include "async_io.h"
 
 // Forward declarations
 struct IOAwaitable;
 struct AlignedRead;
 
-class IoRingWrapper {
+class IoRingWrapper : public AsyncIO {
 public:
     IoRingWrapper(unsigned entries, unsigned flags = 0);
     ~IoRingWrapper();
@@ -21,14 +23,12 @@ public:
     struct io_uring* ring();
     void prep_read(struct io_uring_sqe* sqe, int fd, void* buf, size_t len, off_t offset);
 
-    // 批量read相关接口 - 支持多协程共享batch，但IOAwaitable私有
-    uint64_t add_read_request(int fd, void* buf, size_t len, off_t offset);
-    void flush_batch(); // 提交所有pending的read请求
-    size_t pending_requests_count() const;
-    void clear_batch();
-    
-    // 检查是否启用了HITCHHIKE模式
-    bool is_hitchhike_enabled() const;
+    // Implements AsyncIO
+    uint64_t add_read_request(int fd, void* buf, size_t len, off_t offset) override;
+    void flush_batch() override; // 提交所有pending的read请求
+    size_t pending_requests_count() const override;
+    void clear_batch() override;
+    std::vector<AsyncCompletion> poll_completions(int max_events) override;
 
 private:
     struct io_uring ring_;

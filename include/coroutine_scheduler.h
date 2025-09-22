@@ -10,6 +10,7 @@
 #include <thread>
 #include <atomic>
 #include <stdexcept>
+#include "async_io.h"
 #include "io_ring_wrapper.h"
 #include <vector>
 #include <unordered_map>
@@ -191,9 +192,6 @@ public:
     // Stop the scheduler
     void stop();
 
-    // Schedule an async read operation
-    IOAwaitable async_read(int fd, void* buf, size_t len, off_t offset);
-
     // Schedule multiple async read operations
     std::vector<IOAwaitable> async_read_batch(
         int fd,
@@ -204,12 +202,16 @@ public:
     void schedule_coroutine(std::coroutine_handle<> coro);
 
 private:
-    IoRingWrapper ring_wrapper_;
+    std::unique_ptr<AsyncIO> io_backend_;
     std::atomic<bool> running{false};
-    std::queue<std::coroutine_handle<>> ready_queue;
-    std::unordered_map<uint64_t, std::vector<IOAwaitable*> > pending_ops;
-    std::unordered_map<uint64_t, size_t> pending_counts;  // 跟踪每个op_id的待完成数量
-    std::mutex ready_mutex;
+    std::queue<std::coroutine_handle<>> ready_queue_;
+    // 合并pending_ops和pending_counts为一个结构
+    struct PendingEntry {
+        std::vector<IOAwaitable*> awaitables;
+        size_t remaining = 0; // 待完成计数
+    };
+    std::unordered_map<uint64_t, PendingEntry> pending_ops_;  // op_id -> entry
+    std::mutex ready_mutex_;
 
     void process_completions();
     void execute_ready_coroutines();

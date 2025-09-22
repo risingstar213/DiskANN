@@ -29,6 +29,12 @@ if(ENABLE_COROUTINES AND NOT MSVC)
     if(NOT LIBURING_LIB)
         message(FATAL_ERROR "liburing not found. Please install liburing-dev")
     endif()
+
+    # Find libaio
+    find_library(LIBAIO_LIB aio)
+    if(NOT LIBAIO_LIB)
+        message(FATAL_ERROR "libaio not found. Please install libaio-dev")
+    endif()
     
     message(STATUS "Coroutine support enabled with liburing: ${LIBURING_LIB}")
 endif()
@@ -51,6 +57,7 @@ else()
             async_linux_aligned_file_reader.cpp
             async_pq_flash_index.cpp
             io_ring_wrapper.cpp
+            libaio_wrapper.cpp
         )
     endif()
     
@@ -65,8 +72,8 @@ else()
     if(ENABLE_COROUTINES)
         target_compile_options(${PROJECT_NAME} PRIVATE ${COROUTINE_FLAGS})
         target_compile_options(${PROJECT_NAME}_s PRIVATE ${COROUTINE_FLAGS})
-        target_link_libraries(${PROJECT_NAME} ${LIBURING_LIB})
-        target_link_libraries(${PROJECT_NAME}_s ${LIBURING_LIB})
+        target_link_libraries(${PROJECT_NAME} ${LIBURING_LIB} ${LIBAIO_LIB})
+        target_link_libraries(${PROJECT_NAME}_s ${LIBURING_LIB} ${LIBAIO_LIB})
         target_compile_definitions(${PROJECT_NAME} PRIVATE DISKANN_ASYNC_ENABLED)
         target_compile_definitions(${PROJECT_NAME}_s PRIVATE DISKANN_ASYNC_ENABLED)
     endif()
