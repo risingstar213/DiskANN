@@ -28,6 +28,9 @@ target_link_libraries(test_streaming_scenario ${PROJECT_NAME} ${DISKANN_TOOLS_TC
 add_executable(test_insert_deletes_consolidate test_insert_deletes_consolidate.cpp)
 target_link_libraries(test_insert_deletes_consolidate ${PROJECT_NAME} ${DISKANN_TOOLS_TCMALLOC_LINK_OPTIONS} Boost::program_options)
 
+add_executable(socket_disk_search socket_disk_search.cpp)
+target_link_libraries(socket_disk_search ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} ${DISKANN_TOOLS_TCMALLOC_LINK_OPTIONS} Boost::program_options)
+
 # Add async search executable if coroutines are enabled
 if(ENABLE_COROUTINES AND NOT MSVC)
     add_executable(async_search_disk_index async_search_disk_index.cpp)
@@ -36,6 +39,13 @@ if(ENABLE_COROUTINES AND NOT MSVC)
         target_compile_options(async_search_disk_index PRIVATE ${COROUTINE_FLAGS})
     endif()
     target_link_libraries(async_search_disk_index ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} ${LIBURING_LIB} ${DISKANN_TOOLS_TCMALLOC_LINK_OPTIONS} Boost::program_options)
+
+    add_executable(async_socket_disk_search async_socket_disk_search.cpp)
+    set_property(TARGET async_socket_disk_search PROPERTY CXX_STANDARD 20)
+    if(COROUTINE_FLAGS)
+        target_compile_options(async_socket_disk_search PRIVATE ${COROUTINE_FLAGS})
+    endif()
+    target_link_libraries(async_socket_disk_search ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} ${LIBURING_LIB} ${DISKANN_TOOLS_TCMALLOC_LINK_OPTIONS} Boost::program_options)
     
     # Add simple async search program if coroutines are enabled
     add_executable(simple_async_search simple_async_search.cpp)
@@ -80,7 +90,7 @@ if (NOT MSVC)
     
     # Add async targets to install if available
     if(ENABLE_COROUTINES)
-        list(APPEND INSTALL_TARGETS async_search_disk_index test_coroutine_diskann simple_async_search)
+        list(APPEND INSTALL_TARGETS async_search_disk_index async_socket_disk_search test_coroutine_diskann simple_async_search)
     endif()
     
     install(TARGETS ${INSTALL_TARGETS} RUNTIME)

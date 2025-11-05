@@ -783,6 +783,50 @@ inline void load_aligned_bin_impl(std::basic_istream<char> &reader, size_t actua
     diskann::cout << " done." << std::endl;
 }
 
+// Datatype: Float only !!!
+inline void load_aligned_bin_mem_impl(std::string query_vector_str, float *&data, size_t npts, size_t dim, size_t &rounded_dim)
+{
+    rounded_dim = ROUND_UP(dim, 8);  // 维度扩展为8的整数倍
+    diskann::cout << "【load_aligned_bin_impl_mem】:" << "Metadata: #pts = "
+                  << npts << ", #dims = " << dim
+                  << ", aligned_dim = " << rounded_dim << "... " << std::flush;
+    size_t allocSize =
+        npts * rounded_dim * sizeof(float);  // 计算data需要申请的空大小间
+    diskann::cout << "allocating aligned memory of " << allocSize
+                  << " bytes... " << std::flush;
+    alloc_aligned(
+        ((void**) &data), allocSize,
+        8 * sizeof(
+                float));  // 为data申请大小为
+                          // allocSize的空间，且地址对齐的大小为 8 * sizeof(T)
+    diskann::cout << "done. Copying data to mem_aligned buffer..."
+                  << std::flush;
+    int dims =
+        std::count(query_vector_str.begin(), query_vector_str.end(), ',') /
+        npts;
+    if (dims != dim) {
+      std::cout << std::endl << "nums=" << dims << std::endl;
+      assert(0);
+    }
+
+    std::istringstream iss(query_vector_str);  // 输入流
+    std::string        token;                  // 接收缓冲区
+    float*             vectors_buff = new float[dim];
+    for (size_t i = 0; i < npts; i++) {
+      for (size_t j = 0; j < dim; j++) {
+        getline(iss, token, ',');
+        vectors_buff[j] = std::stof(token);
+      }
+      memcpy(data + i * rounded_dim, vectors_buff, dim * sizeof(float));
+      // memset(data + i * rounded_dim, 1 , dim * sizeof(float)); // 伪造query
+      // 末尾的扩展维度补齐为0
+      memset(data + i * rounded_dim + dim, 0,
+             (rounded_dim - dim) * sizeof(float));
+    }
+    diskann::cout << "|| done." << std::endl;
+    delete[] vectors_buff;
+}
+
 #ifdef EXEC_ENV_OLS
 template <typename T>
 inline void load_aligned_bin(MemoryMappedFiles &files, const std::string &bin_file, T *&data, size_t &npts, size_t &dim,
@@ -824,6 +868,12 @@ inline void load_aligned_bin(const std::string &bin_file, T *&data, size_t &npts
     {
         throw FileException(bin_file, e, __FUNCSIG__, __FILE__, __LINE__);
     }
+}
+
+template <typename T>
+inline void load_aligned_bin_mem(std::string query_vector_str, T *&data, size_t npts, size_t dim, size_t &rounded_dim)
+{
+    load_aligned_bin_mem_impl(query_vector_str, data, npts, dim, rounded_dim);
 }
 
 template <typename InType, typename OutType>
