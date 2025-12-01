@@ -1460,6 +1460,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     size_t stage_emit_cursor = 0;
     std::vector<uint32_t> stage_ids_buffer;
     std::vector<float> stage_dist_buffer;
+    tsl::robin_set<uint32_t> stage_emitted_ids;
     if (streaming_enabled)
     {
         uint64_t capped_k = std::min<uint64_t>(k_search, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
@@ -1468,6 +1469,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         {
             stage_dist_buffer.reserve(stage_ids_buffer.capacity());
         }
+        stage_emitted_ids.reserve(static_cast<size_t>(capped_k));
 
         if (multi_stage_streaming)
         {
@@ -1497,45 +1499,65 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             capped_target = stage_emit_cursor;
         }
 
-        size_t emit_count = capped_target > stage_emit_cursor ? (capped_target - stage_emit_cursor) : 0;
-        if (emit_count == 0 && !is_final)
+        size_t existing_unique = stage_emitted_ids.size();
+        if (capped_target < existing_unique)
         {
-            return;
+            capped_target = existing_unique;
         }
+
+        size_t desired_unique = capped_target;
+        size_t needed_new = desired_unique > existing_unique ? (desired_unique - existing_unique) : 0;
 
         const uint32_t *id_ptr = nullptr;
         const float *dist_ptr = nullptr;
 
-        if (emit_count > 0)
+        if (needed_new > 0)
         {
-            stage_ids_buffer.resize(emit_count);
+            stage_ids_buffer.clear();
+            stage_ids_buffer.reserve(needed_new);
             if (streaming->include_distances)
             {
-                stage_dist_buffer.resize(emit_count);
+                stage_dist_buffer.clear();
+                stage_dist_buffer.reserve(needed_new);
             }
 
-            for (size_t idx = 0; idx < emit_count; ++idx)
+            for (size_t source_idx = 0; source_idx < source.size() && stage_ids_buffer.size() < needed_new; ++source_idx)
             {
-                size_t source_idx = stage_emit_cursor + idx;
                 uint32_t id = source[source_idx].id;
                 if (this->_dummy_pts.find(id) != this->_dummy_pts.end())
                 {
                     id = this->_dummy_to_real_map[id];
                 }
-                stage_ids_buffer[idx] = id;
+
+                auto insert_result = stage_emitted_ids.insert(id);
+                if (!insert_result.second)
+                {
+                    continue;
+                }
+
+                stage_ids_buffer.push_back(id);
                 if (streaming->include_distances)
                 {
-                    stage_dist_buffer[idx] = source[source_idx].distance;
+                    stage_dist_buffer.push_back(source[source_idx].distance);
                 }
             }
 
-            id_ptr = stage_ids_buffer.data();
-            dist_ptr = streaming->include_distances ? stage_dist_buffer.data() : nullptr;
+            needed_new = stage_ids_buffer.size();
+            if (needed_new > 0)
+            {
+                id_ptr = stage_ids_buffer.data();
+                dist_ptr = streaming->include_distances ? stage_dist_buffer.data() : nullptr;
+            }
         }
 
-        stage_emit_cursor = capped_target;
+        if (needed_new == 0 && !is_final)
+        {
+            return;
+        }
 
-        streaming->emit(streaming->user_context, streaming->query_id, stage_idx, id_ptr, dist_ptr, emit_count,
+        stage_emit_cursor = stage_emitted_ids.size();
+
+        streaming->emit(streaming->user_context, streaming->query_id, stage_idx, id_ptr, dist_ptr, needed_new,
                         is_final);
     };
 
@@ -1910,7 +1932,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             }
         }
 
-    cur_list_size = static_cast<unsigned>(retset.size());
+        cur_list_size = static_cast<unsigned>(retset.size());
         hops++;
         step_num++;
 
@@ -2065,6 +2087,9 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
 
     // re-sort by distance
     std::sort(full_retset.begin(), full_retset.end());
+
+    full_retset_final.clear();
+    full_retset_final_ids.clear();
 
     if (FULL_RETSET_SWAP)
     {
