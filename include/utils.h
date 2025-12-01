@@ -787,9 +787,9 @@ inline void load_aligned_bin_impl(std::basic_istream<char> &reader, size_t actua
 inline void load_aligned_bin_mem_impl(std::string query_vector_str, float *&data, size_t npts, size_t dim, size_t &rounded_dim)
 {
     rounded_dim = ROUND_UP(dim, 8);  // 维度扩展为8的整数倍
-    diskann::cout << "【load_aligned_bin_impl_mem】:" << "Metadata: #pts = "
-                  << npts << ", #dims = " << dim
-                  << ", aligned_dim = " << rounded_dim << "... " << std::flush;
+    // diskann::cout << "【load_aligned_bin_impl_mem】:" << "Metadata: #pts = "
+    //               << npts << ", #dims = " << dim
+    //               << ", aligned_dim = " << rounded_dim << "... " << std::flush;
     size_t allocSize =
         npts * rounded_dim * sizeof(float);  // 计算data需要申请的空大小间
     diskann::cout << "allocating aligned memory of " << allocSize

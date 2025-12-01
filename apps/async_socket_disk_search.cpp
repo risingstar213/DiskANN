@@ -6,6 +6,7 @@
 #include "logger.h"
 #include "percentile_stats.h"
 #include "utils.h"
+#include "socket_streaming_writer.h"
 
 #ifndef _WINDOWS
 #include <arpa/inet.h>
@@ -56,7 +57,7 @@ constexpr uint32_t kNodesToCache = 0;
 constexpr uint32_t kSearchListMultiplier = 40;
 constexpr bool kUseReorderData = false;
 constexpr uint32_t kIdLength = 8;
-constexpr uint32_t kCoroutinesPerThread = 40;
+constexpr uint32_t kCoroutinesPerThread = 20;
 constexpr uint32_t kMinConcurrentQueries = kCoroutinesPerThread;
 
 int g_listen_socket = -1;
@@ -272,16 +273,17 @@ void log_iteration_stats(uint32_t L, double qps,
 using AsyncIndexPtr = std::shared_ptr<diskann::AsyncPQFlashIndex<DataType>>;
 
 diskann::Task<void> async_single_search(const AsyncIndexPtr& index,
-                                        const DataType*     query,
-                                        uint32_t            topk,
-                                        uint32_t            L,
-                                        uint64_t*           result_ids,
-                                        float*              result_dists,
-                                        diskann::QueryStats* stats) {
+                const DataType*     query,
+                uint32_t            topk,
+                uint32_t            L,
+                uint64_t*           result_ids,
+                float*              result_dists,
+                diskann::QueryStats* stats,
+                const diskann::SearchStreamOptions* streaming = nullptr) {
   co_await index->async_cached_beam_search(
       query, topk, L, result_ids, result_dists, kBeamWidth, false,
       static_cast<uint32_t>(0), std::numeric_limits<uint32_t>::max(),
-      kUseReorderData, stats);
+  kUseReorderData, stats, streaming);
 }
 
 void validate_configuration(diskann::Metric metric) {
@@ -392,10 +394,10 @@ bool receive_query_payload(int connfd, QueryPayload& payload) {
   }
 
   payload.request = request_opt.value();
-  std::cout << "[server] meta data: topk=" << payload.request.topk
-            << " query_count=" << payload.request.query_count
-            << " payload_chars=" << payload.request.payload_chars
-            << std::endl;
+  // std::cout << "[server] meta data: topk=" << payload.request.topk
+  //           << " query_count=" << payload.request.query_count
+  //           << " payload_chars=" << payload.request.payload_chars
+  //           << std::endl;
 
   constexpr std::string_view kAck{"Go"};
   if (!send_all(connfd, kAck.data(), kAck.size())) {
@@ -409,8 +411,8 @@ bool receive_query_payload(int connfd, QueryPayload& payload) {
     std::cout << "[server] failed to receive query payload" << std::endl;
     return false;
   }
-  std::cout << "[server] received query payload size="
-            << query_vector_payload.size() << std::endl;
+  // std::cout << "[server] received query payload size="
+  //           << query_vector_payload.size() << std::endl;
 
   DataType* raw_query = nullptr;
   size_t    query_aligned_dim = 0;
@@ -491,8 +493,8 @@ QueryExecutionOutput execute_queries(const AsyncIndexPtr& async_index,
           stats_background.data() + i);
     }
 
-    std::cout << "[server] added " << background_needed
-              << " background queries to simulate load" << std::endl;
+    // std::cout << "[server] added " << background_needed
+    //           << " background queries to simulate load" << std::endl;
   }
 
   for (auto& task : tasks) {
@@ -534,6 +536,107 @@ QueryExecutionOutput execute_queries(const AsyncIndexPtr& async_index,
 
   return QueryExecutionOutput{L, qps, payload.request,
                               std::move(result_ids_u32)};
+}
+
+bool execute_streaming_query(const AsyncIndexPtr& async_index,
+                             diskann::CoroutineScheduler* scheduler,
+                             const QueryPayload& payload,
+                             diskann::streaming::StageChunkWriter& writer,
+                             diskann::SearchStreamOptions& stream_opts) {
+  const SearchRequest& request = payload.request;
+  const uint32_t L = static_cast<uint32_t>(request.topk) * kSearchListMultiplier;
+  const DataType* base_query = payload.query.get();
+  const size_t aligned_dim = payload.aligned_dim;
+  const size_t stats_dim = static_cast<size_t>(std::max(1, request.topk));
+
+  const int primary_queries = request.query_count;
+  const int target_concurrency =
+      std::max(primary_queries, static_cast<int>(kMinConcurrentQueries));
+  const int background_needed = target_concurrency - primary_queries;
+
+  std::vector<uint64_t> primary_ids(static_cast<std::size_t>(request.topk));
+  std::vector<float> primary_dists(primary_ids.size());
+  diskann::QueryStats primary_stats{};
+  diskann::streaming::QueryStatsActivator primary_stats_guard;
+  primary_stats_guard.configure(&primary_stats, 1, stats_dim);
+
+  std::vector<uint64_t> background_ids;
+  std::vector<float> background_dists;
+  std::vector<diskann::QueryStats> background_stats;
+  diskann::streaming::QueryStatsActivator background_stats_guard;
+  if (background_needed > 0) {
+    background_ids.resize(static_cast<std::size_t>(background_needed) * request.topk);
+    background_dists.resize(background_ids.size());
+    background_stats.resize(static_cast<std::size_t>(background_needed));
+    background_stats_guard.configure(background_stats.data(), background_stats.size(), stats_dim);
+  }
+
+  std::vector<diskann::Task<void>> tasks;
+  tasks.reserve(static_cast<std::size_t>(target_concurrency));
+
+  auto enqueue_search = [&](const DataType* query_ptr, uint64_t* id_out,
+                            float* dist_out, diskann::QueryStats* stat_out,
+                            const diskann::SearchStreamOptions* streaming) {
+    tasks.emplace_back(async_single_search(async_index, query_ptr,
+                                           static_cast<uint32_t>(request.topk),
+                                           L, id_out, dist_out, stat_out,
+                                           streaming));
+  };
+
+  for (int i = 0; i < primary_queries; ++i) {
+    const DataType* query_ptr = base_query + static_cast<std::size_t>(i) * aligned_dim;
+    diskann::SearchStreamOptions* streaming = (i == 0) ? &stream_opts : nullptr;
+    enqueue_search(query_ptr, primary_ids.data(), primary_dists.data(),
+                   &primary_stats, streaming);
+  }
+
+  for (int i = 0; i < background_needed; ++i) {
+    const int source_idx = primary_queries == 0 ? 0 : i % primary_queries;
+    const DataType* background_query =
+        base_query + static_cast<std::size_t>(source_idx) * aligned_dim;
+    uint64_t* id_out = background_ids.data() + static_cast<std::size_t>(i) * request.topk;
+    float* dist_out = background_dists.data() + static_cast<std::size_t>(i) * request.topk;
+    enqueue_search(background_query, id_out, dist_out,
+                   background_stats.data() + i, nullptr);
+  }
+
+  if (background_needed > 0) {
+    // std::cout << "[server] added " << background_needed
+    //           << " background queries to simulate load" << std::endl;
+  }
+
+  for (auto& task : tasks) {
+    if (task.coro) {
+      scheduler->schedule_coroutine(task.coro);
+    }
+  }
+
+  auto search_start = std::chrono::high_resolution_clock::now();
+  scheduler->run();
+  for (auto& task : tasks) {
+    task.get_result();
+  }
+  auto search_end = std::chrono::high_resolution_clock::now();
+
+  writer.finalize();
+  if (!writer.ok()) {
+    return false;
+  }
+
+  const double elapsed =
+      std::chrono::duration<double>(search_end - search_start).count();
+  const int total_queries_executed = target_concurrency;
+  const double qps = (elapsed > 0.0 && total_queries_executed > 0)
+                         ? total_queries_executed / elapsed
+                         : 0.0;
+
+  std::vector<diskann::QueryStats> stats_vec;
+  stats_vec.reserve(static_cast<std::size_t>(target_concurrency));
+  stats_vec.push_back(primary_stats);
+  stats_vec.insert(stats_vec.end(), background_stats.begin(), background_stats.end());
+  log_iteration_stats(L, qps, stats_vec);
+
+  return true;
 }
 
 struct ResponseChunk {
@@ -648,12 +751,44 @@ void handle_client_connection(int connfd, const AsyncIndexPtr& async_index,
       return;
     }
 
+    const bool streaming_requested = (payload.request.query_count == 1);
+    const size_t total_ids_expected = static_cast<std::size_t>(payload.request.topk) *
+                                      static_cast<std::size_t>(payload.request.query_count);
+    auto send_lambda = [connfd](const char* data, size_t len) {
+      return send_all(connfd, data, len);
+    };
+    diskann::streaming::StageChunkWriter stage_writer(send_lambda, 2, total_ids_expected);
+    bool streaming_active = streaming_requested;
+    if (streaming_active && !stage_writer.begin()) {
+      streaming_active = false;
+      // std::cout << "[server] streaming header send failed, using buffered response" << std::endl;
+    }
+
+    diskann::SearchStreamOptions stream_opts{};
+    if (streaming_active) {
+      stream_opts.stage_count = 2;
+      stream_opts.first_stage_min_results = static_cast<uint32_t>(std::max(1, payload.request.topk / 2));
+      stream_opts.min_ios_before_emit = 2;
+      stream_opts.min_steps_before_emit = 2;
+      stream_opts.user_context = &stage_writer;
+      stream_opts.emit = diskann::streaming::StageChunkWriter::callback_adapter;
+      stream_opts.query_id = 0;
+
+      // std::cout << "[server] streaming enabled for single query" << std::endl;
+    }
+
     print_search_header();
+    bool response_ok = true;
+    if (streaming_active) {
+      response_ok = execute_streaming_query(async_index, scheduler, payload,
+                                           stage_writer, stream_opts);
+    } else {
+      QueryExecutionOutput execution =
+          execute_queries(async_index, scheduler, payload);
+      response_ok = send_search_results(connfd, execution);
+    }
 
-    QueryExecutionOutput execution =
-        execute_queries(async_index, scheduler, payload);
-
-    if (!send_search_results(connfd, execution)) {
+    if (!response_ok) {
       return;
     }
 

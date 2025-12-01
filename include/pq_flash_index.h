@@ -21,6 +21,23 @@
 namespace diskann
 {
 
+struct SearchStreamOptions
+{
+    using EmitStageCallback = void (*)(void *user_context, uint32_t query_id, uint32_t stage_idx,
+                                       const uint32_t *ids, const float *distances, size_t count,
+                                       bool is_final_stage);
+
+    EmitStageCallback emit = nullptr;
+    void *user_context = nullptr;
+    uint32_t query_id = 0;
+    uint32_t stage_count = 0;
+    uint32_t first_stage_min_results = 0;
+    float first_stage_fraction = 0.5f;
+    uint32_t min_ios_before_emit = 0;
+    uint32_t min_steps_before_emit = 0;
+    bool include_distances = false;
+};
+
 template <typename T, typename LabelT = uint32_t> class PQFlashIndex
 {
     // Friend declaration to allow AsyncPQFlashIndex access to private members
@@ -66,23 +83,27 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
 
     DISKANN_DLLEXPORT void cached_beam_search(const T *query, const uint64_t k_search, const uint64_t l_search,
                                               uint64_t *res_ids, float *res_dists, const uint64_t beam_width,
-                                              const bool use_reorder_data = false, QueryStats *stats = nullptr);
+                                              const bool use_reorder_data = false, QueryStats *stats = nullptr,
+                                              const SearchStreamOptions *streaming = nullptr);
 
     DISKANN_DLLEXPORT void cached_beam_search(const T *query, const uint64_t k_search, const uint64_t l_search,
                                               uint64_t *res_ids, float *res_dists, const uint64_t beam_width,
                                               const bool use_filter, const LabelT &filter_label,
-                                              const bool use_reorder_data = false, QueryStats *stats = nullptr);
+                                              const bool use_reorder_data = false, QueryStats *stats = nullptr,
+                                              const SearchStreamOptions *streaming = nullptr);
 
     DISKANN_DLLEXPORT void cached_beam_search(const T *query, const uint64_t k_search, const uint64_t l_search,
                                               uint64_t *res_ids, float *res_dists, const uint64_t beam_width,
                                               const uint32_t io_limit, const bool use_reorder_data = false,
-                                              QueryStats *stats = nullptr);
+                                              QueryStats *stats = nullptr,
+                                              const SearchStreamOptions *streaming = nullptr);
 
     DISKANN_DLLEXPORT void cached_beam_search(const T *query, const uint64_t k_search, const uint64_t l_search,
                                               uint64_t *res_ids, float *res_dists, const uint64_t beam_width,
                                               const bool use_filter, const LabelT &filter_label,
                                               const uint32_t io_limit, const bool use_reorder_data = false,
-                                              QueryStats *stats = nullptr);
+                                              QueryStats *stats = nullptr,
+                                              const SearchStreamOptions *streaming = nullptr);
 
     DISKANN_DLLEXPORT LabelT get_converted_label(const std::string &filter_label);
 

@@ -22,7 +22,8 @@ public:
         uint64_t *indices, float *distances, const uint64_t beam_width,
         const bool use_filter = false, const LabelT &filter_label = static_cast<LabelT>(0),
         const uint32_t io_limit = std::numeric_limits<uint32_t>::max(),
-        const bool use_reorder_data = false, QueryStats *stats = nullptr);
+        const bool use_reorder_data = false, QueryStats *stats = nullptr,
+        const SearchStreamOptions *streaming = nullptr);
 
     // Batch async search for multiple queries
     DISKANN_DLLEXPORT Task<void> async_batch_search(
@@ -35,7 +36,8 @@ public:
         const std::vector<LabelT> &filter_labels = {},
         const uint32_t io_limit = std::numeric_limits<uint32_t>::max(),
         const bool use_reorder_data = false,
-        std::vector<QueryStats> *all_stats = nullptr);
+        std::vector<QueryStats> *all_stats = nullptr,
+        const std::vector<SearchStreamOptions> *streaming_options = nullptr);
 
 private:
     // Async version of the core search logic
@@ -44,7 +46,7 @@ private:
         uint64_t *indices, float *distances, const uint64_t beam_width,
         const bool use_filter, const LabelT &filter_label,
         const uint32_t io_limit, const bool use_reorder_data,
-        QueryStats *stats);
+        QueryStats *stats, const SearchStreamOptions *streaming);
 
     std::shared_ptr<AsyncLinuxAlignedFileReader> async_reader;
 };

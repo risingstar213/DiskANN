@@ -8,21 +8,18 @@
 #include <netinet/in.h>
 #include <signal.h>
 
-#include <atomic>
-
 #include <iomanip>
 #include <omp.h>
 #include <pq_flash_index.h>
-#include <set>
 #include <sstream>
 #include <string.h>
 #include <time.h>
 #include <vector>
 #include <boost/program_options.hpp>
 
-#include "timer.h"
 #include "utils.h"
 #include "percentile_stats.h"
+#include "socket_streaming_writer.h"
 
 #ifndef _WINDOWS
 #include <sys/mman.h>
@@ -322,6 +319,30 @@ int main() {
     printf("【sever】meta datas: topk=%d input_query_num=%d recv_length=%d\n",
            topk, input_query_num, recv_length);
 
+    const size_t total_ids_expected = static_cast<size_t>(topk) * static_cast<size_t>(input_query_num);
+    auto send_lambda = [](const char *data, size_t len) { return send_all(connfd, data, len); };
+    bool streaming_active = (input_query_num == 1);
+    diskann::streaming::StageChunkWriter stage_writer(send_lambda, 2, total_ids_expected);
+    if (streaming_active)
+    {
+      streaming_active = stage_writer.begin();
+      if (!streaming_active)
+      {
+        printf("[server] streaming header send failed, falling back to single response\n");
+      }
+    }
+
+    diskann::SearchStreamOptions stream_opts{};
+    if (streaming_active)
+    {
+      stream_opts.stage_count = 2;
+      stream_opts.first_stage_min_results = static_cast<uint32_t>(std::max(1, topk / 2));
+      stream_opts.min_ios_before_emit = 2;
+      stream_opts.min_steps_before_emit = 2;
+      stream_opts.user_context = &stage_writer;
+      stream_opts.emit = diskann::streaming::StageChunkWriter::callback_adapter;
+    }
+
     char buff1[] = "Go";
     send(connfd, buff1, strlen(buff1), 0);
 
@@ -363,6 +384,7 @@ int main() {
     std::vector<std::vector<float>>    query_result_dists(1);
 
     uint32_t optimized_beamwidth = 2;
+    bool     response_ok = true;
 
     // 为减少代码改动，暂未取消 for循环
     for (uint32_t test_id = 0; test_id < 1;
@@ -384,18 +406,41 @@ int main() {
       query_result_ids[test_id].resize(topk * query_num);  // 结果的id集合
       query_result_dists[test_id].resize(topk * query_num);  // 结果的距离集合
 
-      auto stats = new diskann::QueryStats[query_num];
+        auto stats = new diskann::QueryStats[query_num];
+        diskann::streaming::QueryStatsActivator streaming_stats_guard;
+        if (streaming_active)
+        {
+          streaming_stats_guard.configure(stats, query_num, static_cast<size_t>(topk));
+        }
 
       std::vector<uint64_t> query_result_ids_64(topk * query_num);
       auto                  s = std::chrono::high_resolution_clock::now();
 
-#pragma omp parallel for schedule(dynamic, 1)  // 使用omp并行处理for循环
-      for (__s64 i = 0; i < (int64_t) query_num; i++) {  // 处理每个query
-        _pFlashIndex->cached_beam_search(
-            query + (i * query_aligned_dim), topk, L,
-            query_result_ids_64.data() + (i * topk),
-            query_result_dists[test_id].data() + (i * topk),
-            optimized_beamwidth, USE_REORDER_DATA, stats + i);
+      diskann::SearchStreamOptions *stream_opts_ptr = streaming_active ? &stream_opts : nullptr;
+
+        if (streaming_active)
+      {
+        for (__s64 i = 0; i < (int64_t)query_num; i++)
+        {
+          stream_opts.query_id = static_cast<uint32_t>(i);
+          _pFlashIndex->cached_beam_search(
+          query + (i * query_aligned_dim), topk, L,
+          query_result_ids_64.data() + (i * topk),
+          query_result_dists[test_id].data() + (i * topk),
+          optimized_beamwidth, USE_REORDER_DATA, stats + i, stream_opts_ptr);
+        }
+      }
+      else
+      {
+    #pragma omp parallel for schedule(dynamic, 1)
+        for (__s64 i = 0; i < (int64_t)query_num; i++)
+        {
+          _pFlashIndex->cached_beam_search(
+          query + (i * query_aligned_dim), topk, L,
+          query_result_ids_64.data() + (i * topk),
+          query_result_dists[test_id].data() + (i * topk),
+          optimized_beamwidth, USE_REORDER_DATA, stats + i, stream_opts_ptr);
+        }
       }
       auto e = std::chrono::high_resolution_clock::now();
       std::chrono::duration<double> diff = e - s;
@@ -443,7 +488,18 @@ int main() {
     diskann::aligned_free(query);
     printf("【sever】search over\n");
 
-    if (!send_segmented_results(connfd, final_ids, topk, query_num)) {
+    if (streaming_active)
+    {
+      stage_writer.finalize();
+      response_ok = stage_writer.ok();
+    }
+    else
+    {
+      response_ok = send_segmented_results(connfd, final_ids, topk, query_num);
+    }
+
+    if (!response_ok)
+    {
       printf("[server] failed to send search results\n");
     }
 

@@ -9,6 +9,8 @@
 #include "pq_flash_index.h"
 #include "cosine_similarity.h"
 
+#include <cmath>
+
 #include <set>
 #include <iterator>
 
@@ -1400,31 +1402,33 @@ bool getNextCompletedRequest(std::shared_ptr<AlignedFileReader> &reader, IOConte
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
-                                                 const bool use_reorder_data, QueryStats *stats)
+                                                 const bool use_reorder_data, QueryStats *stats,
+                                                 const SearchStreamOptions *streaming)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, std::numeric_limits<uint32_t>::max(),
-                       use_reorder_data, stats);
+                       use_reorder_data, stats, streaming);
 }
 
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const bool use_filter, const LabelT &filter_label,
-                                                 const bool use_reorder_data, QueryStats *stats)
+                                                 const bool use_reorder_data, QueryStats *stats,
+                                                 const SearchStreamOptions *streaming)
 {
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, use_filter, filter_label,
-                       std::numeric_limits<uint32_t>::max(), use_reorder_data, stats);
+                       std::numeric_limits<uint32_t>::max(), use_reorder_data, stats, streaming);
 }
 
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const uint32_t io_limit, const bool use_reorder_data,
-                                                 QueryStats *stats)
+                                                 QueryStats *stats, const SearchStreamOptions *streaming)
 {
     LabelT dummy_filter = 0;
     cached_beam_search(query1, k_search, l_search, indices, distances, beam_width, false, dummy_filter, io_limit,
-                       use_reorder_data, stats);
+                       use_reorder_data, stats, streaming);
 }
 
 template <typename T, typename LabelT>
@@ -1432,7 +1436,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
                                                  const bool use_filter, const LabelT &filter_label,
                                                  const uint32_t io_limit, const bool use_reorder_data,
-                                                 QueryStats *stats)
+                                                 QueryStats *stats, const SearchStreamOptions *streaming)
 {
 
     uint64_t num_sector_per_nodes = DIV_ROUND_UP(_max_node_len, defaults::SECTOR_LEN);
@@ -1445,6 +1449,95 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     IOContext &ctx = data->ctx;
     auto query_scratch = &(data->scratch);
     auto pq_query_scratch = query_scratch->pq_scratch();
+
+    const bool streaming_enabled = (streaming != nullptr && streaming->emit != nullptr && streaming->stage_count > 0);
+    const bool multi_stage_streaming = streaming_enabled && streaming->stage_count >= 2;
+    uint32_t stage_one_target = 0;
+    const uint32_t final_stage_idx = streaming_enabled ? (streaming->stage_count - 1) : 0;
+    const uint32_t min_ios_before_emit = (streaming_enabled ? streaming->min_ios_before_emit : 0);
+    const uint32_t min_steps_before_emit = (streaming_enabled ? streaming->min_steps_before_emit : 0);
+    bool stage_one_emitted = false;
+    size_t stage_emit_cursor = 0;
+    std::vector<uint32_t> stage_ids_buffer;
+    std::vector<float> stage_dist_buffer;
+    if (streaming_enabled)
+    {
+        uint64_t capped_k = std::min<uint64_t>(k_search, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
+        stage_ids_buffer.reserve(static_cast<size_t>(capped_k));
+        if (streaming->include_distances)
+        {
+            stage_dist_buffer.reserve(stage_ids_buffer.capacity());
+        }
+
+        if (multi_stage_streaming)
+        {
+            if (streaming->first_stage_min_results > 0)
+            {
+                stage_one_target = std::min<uint32_t>(static_cast<uint32_t>(k_search), streaming->first_stage_min_results);
+            }
+            else
+            {
+                float ratio = (streaming->first_stage_fraction <= 0.0f) ? 0.5f : streaming->first_stage_fraction;
+                auto tentative = static_cast<uint32_t>(
+                    std::ceil(ratio * static_cast<float>(std::min<uint64_t>(k_search, capped_k))));
+                stage_one_target = std::min<uint32_t>(static_cast<uint32_t>(k_search), std::max<uint32_t>(tentative, 1u));
+            }
+        }
+    }
+
+    auto emit_stage = [&](uint32_t stage_idx, bool is_final, const std::vector<Neighbor> &source, size_t target_total) {
+        if (!streaming_enabled || streaming->emit == nullptr)
+        {
+            return;
+        }
+
+        size_t capped_target = std::min(target_total, source.size());
+        if (capped_target < stage_emit_cursor)
+        {
+            capped_target = stage_emit_cursor;
+        }
+
+        size_t emit_count = capped_target > stage_emit_cursor ? (capped_target - stage_emit_cursor) : 0;
+        if (emit_count == 0 && !is_final)
+        {
+            return;
+        }
+
+        const uint32_t *id_ptr = nullptr;
+        const float *dist_ptr = nullptr;
+
+        if (emit_count > 0)
+        {
+            stage_ids_buffer.resize(emit_count);
+            if (streaming->include_distances)
+            {
+                stage_dist_buffer.resize(emit_count);
+            }
+
+            for (size_t idx = 0; idx < emit_count; ++idx)
+            {
+                size_t source_idx = stage_emit_cursor + idx;
+                uint32_t id = source[source_idx].id;
+                if (this->_dummy_pts.find(id) != this->_dummy_pts.end())
+                {
+                    id = this->_dummy_to_real_map[id];
+                }
+                stage_ids_buffer[idx] = id;
+                if (streaming->include_distances)
+                {
+                    stage_dist_buffer[idx] = source[source_idx].distance;
+                }
+            }
+
+            id_ptr = stage_ids_buffer.data();
+            dist_ptr = streaming->include_distances ? stage_dist_buffer.data() : nullptr;
+        }
+
+        stage_emit_cursor = capped_target;
+
+        streaming->emit(streaming->user_context, streaming->query_id, stage_idx, id_ptr, dist_ptr, emit_count,
+                        is_final);
+    };
 
     // reset query scratch
     query_scratch->reset();
@@ -1908,12 +2001,12 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                     }
                 }
 
-                if (changed)
+                if (changed && streaming_enabled)
                 {
                     if (use_cache)
-                        std::cout << stats->n_ios + cache_hitnum / 2 << "," << full_retset_final_ids.size() << ",";
+                        std::cout << stats->n_ios + cache_hitnum / 2 << "," << full_retset_final_ids.size() << "," << std::endl;
                     else
-                        std::cout << stats->n_ios << "," << full_retset_final_ids.size() << ",";
+                        std::cout << stats->n_ios << "," << full_retset_final_ids.size() << "," << std::endl;
                 }
 
                 if (step_num == next_step_po)
@@ -1939,6 +2032,18 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                 register_hitnum_reset_nn(hrs[i], stats->hitnum_reset_n[i], stats->hitnum_reset_n_split[i],
                                          stats->time_reset_n[i], stats->io_reset_n[i],
                                          stats->hitnum_reset_n_final[i], stats->len_frf_n[i]);
+            }
+        }
+
+        if (streaming_enabled && multi_stage_streaming && !stage_one_emitted && stage_one_target > 0)
+        {
+            bool enough_results = full_retset_final.size() >= stage_one_target;
+            bool io_ready = (min_ios_before_emit == 0) || (num_ios >= min_ios_before_emit);
+            bool step_ready = (min_steps_before_emit == 0) || (step_num >= min_steps_before_emit);
+            if (enough_results && io_ready && step_ready)
+            {
+                emit_stage(0, false, full_retset_final, stage_one_target);
+                stage_one_emitted = true;
             }
         }
 
@@ -2027,6 +2132,13 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         }
 
         std::sort(full_retset.begin(), full_retset.end());
+    }
+
+    if (streaming_enabled)
+    {
+        std::sort(full_retset.begin(), full_retset.end());
+        size_t target_total = std::min<uint64_t>(k_search, full_retset.size());
+        emit_stage(final_stage_idx, true, full_retset, target_total);
     }
 
     // copy k_search values
