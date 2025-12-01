@@ -86,6 +86,7 @@ struct QueryPayload {
 struct QueryExecutionOutput {
   uint32_t               L = 0;
   double                 qps = 0.0;
+  SearchRequest          request{};
   std::vector<uint32_t>  result_ids;
 };
 
@@ -531,23 +532,97 @@ QueryExecutionOutput execute_queries(const AsyncIndexPtr& async_index,
       result_ids_primary.data(), result_ids_u32.data(), primary_queries,
       static_cast<uint32_t>(request.topk));
 
-  return QueryExecutionOutput{L, qps, std::move(result_ids_u32)};
+  return QueryExecutionOutput{L, qps, payload.request,
+                              std::move(result_ids_u32)};
 }
 
-bool send_search_results(int connfd, const std::vector<uint32_t>& result_ids) {
-  std::ostringstream response_stream;
-  for (std::size_t i = 0; i < result_ids.size(); ++i) {
-    if (i != 0) {
-      response_stream << ',';
-    }
-    response_stream << result_ids[i];
+struct ResponseChunk {
+  std::size_t offset = 0;
+  std::size_t count = 0;
+};
+
+std::vector<ResponseChunk> plan_response_chunks(std::size_t total_ids) {
+  std::vector<ResponseChunk> chunks;
+  if (total_ids == 0) {
+    return chunks;
   }
-  const std::string response = response_stream.str();
-  if (!send_all(connfd, response.data(), response.size())) {
-    std::cout << "[server] failed to send results" << std::endl;
+
+  std::size_t first = total_ids / 2;
+  if (first == 0) {
+    first = total_ids;
+  }
+  std::size_t second = total_ids - first;
+
+  chunks.push_back(ResponseChunk{0, first});
+  if (second > 0) {
+    chunks.push_back(ResponseChunk{first, second});
+  }
+
+  return chunks;
+}
+
+std::string build_chunk_payload(const std::vector<uint32_t>& result_ids,
+                                std::size_t offset, std::size_t count) {
+  std::ostringstream payload_stream;
+  for (std::size_t i = 0; i < count; ++i) {
+    if (i != 0) {
+      payload_stream << ',';
+    }
+    payload_stream << result_ids[offset + i];
+  }
+  return payload_stream.str();
+}
+
+bool send_search_results(int connfd, const QueryExecutionOutput& execution) {
+  const std::size_t expected_total =
+      static_cast<std::size_t>(execution.request.topk) *
+      static_cast<std::size_t>(execution.request.query_count);
+  const std::size_t total_ids = execution.result_ids.size();
+
+  if (total_ids != expected_total) {
+    std::cout << "[server] warning: result size mismatch expected="
+              << expected_total << " actual=" << total_ids << std::endl;
+  }
+
+  const auto chunks = plan_response_chunks(total_ids);
+
+  std::ostringstream header_stream;
+  header_stream << "RESULT " << chunks.size() << ' ' << total_ids << '\n';
+  const std::string header = header_stream.str();
+  if (!send_all(connfd, header.data(), header.size())) {
+    std::cout << "[server] failed to send result header" << std::endl;
     return false;
   }
-  std::cout << "[server] sent result ids: " << response << std::endl;
+
+  for (std::size_t idx = 0; idx < chunks.size(); ++idx) {
+    const auto& chunk = chunks[idx];
+    const std::string payload =
+        build_chunk_payload(execution.result_ids, chunk.offset, chunk.count);
+
+    std::ostringstream chunk_header_stream;
+    chunk_header_stream << "PART " << (idx + 1) << ' ' << chunk.count << ' '
+                        << payload.size() << '\n';
+    const std::string chunk_header = chunk_header_stream.str();
+    if (!send_all(connfd, chunk_header.data(), chunk_header.size())) {
+      std::cout << "[server] failed to send chunk header" << std::endl;
+      return false;
+    }
+
+    if (!payload.empty() &&
+        !send_all(connfd, payload.data(), payload.size())) {
+      std::cout << "[server] failed to send chunk payload" << std::endl;
+      return false;
+    }
+
+    if (!send_all(connfd, "\n", 1)) {
+      std::cout << "[server] failed to send chunk delimiter" << std::endl;
+      return false;
+    }
+
+    std::cout << "[server] sent chunk " << (idx + 1) << "/" << chunks.size()
+              << " ids=" << chunk.count << std::endl;
+  }
+
   return true;
 }
 
@@ -578,7 +653,7 @@ void handle_client_connection(int connfd, const AsyncIndexPtr& async_index,
     QueryExecutionOutput execution =
         execute_queries(async_index, scheduler, payload);
 
-    if (!send_search_results(connfd, execution.result_ids)) {
+    if (!send_search_results(connfd, execution)) {
       return;
     }
 

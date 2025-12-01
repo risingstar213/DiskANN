@@ -4,22 +4,29 @@
 #pragma once
 
 #include <cstddef>
-#include <mutex>
+#include <cstring>
+#include <limits>
 #include <vector>
-#include "utils.h"
 
 namespace diskann
 {
 
 struct Neighbor
 {
-    unsigned id;
-    float distance;
-    bool expanded;
+    unsigned id = 0;
+    float distance = 0.0f;
+    bool expanded = false;
+    bool flag = false;
+    unsigned remain_step = 0;
+    unsigned remain_pos = 0;
+    unsigned last_pos = std::numeric_limits<unsigned>::max();
+    bool send_out = false;
 
     Neighbor() = default;
 
-    Neighbor(unsigned id, float distance) : id{id}, distance{distance}, expanded(false)
+    Neighbor(unsigned id, float distance, bool f = false)
+        : id{id}, distance{distance}, expanded(false), flag(f), remain_step(0), remain_pos(0),
+          last_pos(std::numeric_limits<unsigned>::max()), send_out(false)
     {
     }
 
@@ -82,7 +89,8 @@ class NeighborPriorityQueue
         {
             std::memmove(&_data[lo + 1], &_data[lo], (_size - lo) * sizeof(Neighbor));
         }
-        _data[lo] = {nbr.id, nbr.distance};
+        _data[lo] = nbr;
+        _data[lo].expanded = false;
         if (_size < _capacity)
         {
             _size++;

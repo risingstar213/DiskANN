@@ -14,8 +14,10 @@
 #include <omp.h>
 #include <pq_flash_index.h>
 #include <set>
+#include <sstream>
 #include <string.h>
 #include <time.h>
+#include <vector>
 #include <boost/program_options.hpp>
 
 #include "timer.h"
@@ -39,6 +41,114 @@
 #define DEFAULT_PORT 8080  // 指定端口为16555
 #define MAXLINK 128
 int sockfd, connfd;  // 定义服务端套接字和客户端套接字
+
+struct ResponseChunk {
+  size_t offset = 0;
+  size_t count = 0;
+};
+
+bool send_all(int fd, const char* data, size_t bytes) {
+  size_t total_sent = 0;
+  while (total_sent < bytes) {
+    ssize_t sent = send(fd, data + total_sent, bytes - total_sent, 0);
+    if (sent < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    if (sent == 0) {
+      return false;
+    }
+    total_sent += static_cast<size_t>(sent);
+  }
+  return true;
+}
+
+std::vector<ResponseChunk> plan_response_chunks(size_t total_ids) {
+  std::vector<ResponseChunk> chunks;
+  if (total_ids == 0) {
+    return chunks;
+  }
+
+  size_t first = total_ids / 2;
+  if (first == 0) {
+    first = total_ids;
+  }
+  size_t second = total_ids - first;
+
+  chunks.push_back(ResponseChunk{0, first});
+  if (second > 0) {
+    chunks.push_back(ResponseChunk{first, second});
+  }
+
+  return chunks;
+}
+
+std::string build_chunk_payload(const std::vector<uint32_t>& result_ids,
+                                size_t offset, size_t count) {
+  std::ostringstream payload_stream;
+  for (size_t i = 0; i < count; ++i) {
+    if (i != 0) {
+      payload_stream << ',';
+    }
+    payload_stream << result_ids[offset + i];
+  }
+  return payload_stream.str();
+}
+
+bool send_segmented_results(int connfd, const std::vector<uint32_t>& result_ids,
+                            int topk, int query_num) {
+  const size_t expected_total =
+      static_cast<size_t>(topk) * static_cast<size_t>(query_num);
+  const size_t total_ids = result_ids.size();
+  if (total_ids != expected_total) {
+    printf("[server] warning: result size mismatch expected=%zu actual=%zu\n",
+           expected_total, total_ids);
+  }
+
+  const auto chunks = plan_response_chunks(total_ids);
+
+  std::ostringstream header_stream;
+  header_stream << "RESULT " << chunks.size() << ' ' << total_ids << '\n';
+  const std::string header = header_stream.str();
+  if (!send_all(connfd, header.data(), header.size())) {
+    printf("[server] failed to send result header\n");
+    return false;
+  }
+
+  for (size_t idx = 0; idx < chunks.size(); ++idx) {
+    const auto& chunk = chunks[idx];
+    const std::string payload =
+        build_chunk_payload(result_ids, chunk.offset, chunk.count);
+
+    std::ostringstream chunk_header_stream;
+    chunk_header_stream << "PART " << (idx + 1) << ' ' << chunk.count << ' '
+                        << payload.size() << '\n';
+    const std::string chunk_header = chunk_header_stream.str();
+
+    if (!send_all(connfd, chunk_header.data(), chunk_header.size())) {
+      printf("[server] failed to send chunk header\n");
+      return false;
+    }
+
+    if (!payload.empty() &&
+        !send_all(connfd, payload.data(), payload.size())) {
+      printf("[server] failed to send chunk payload\n");
+      return false;
+    }
+
+    if (!send_all(connfd, "\n", 1)) {
+      printf("[server] failed to send chunk delimiter\n");
+      return false;
+    }
+
+    printf("[server] sent chunk %zu/%zu ids=%zu\n", idx + 1,
+           chunks.size(), chunk.count);
+  }
+
+  return true;
+}
 
 // #define DATA_TYPR_NAME "float"
 // #define DATA_TYPR float
@@ -233,7 +343,6 @@ int main() {
     // VDB查询开始（当前为一次查询完毕）
     printf("【sever】search start\n");
     size_t query_num = input_query_num;
-    int*   final_result_ids = new int[query_num * topk];
     // 还需要进一步解析query
     DATA_TYPR* query = nullptr;
     size_t     query_aligned_dim;
@@ -321,39 +430,28 @@ int main() {
       delete[] stats;
     }
 
-    std::string final_result_ids_str = "";
-    for (int i = 0; i < query_result_ids[0].size(); ++i) {
-      final_result_ids_str =
-          final_result_ids_str + std::to_string(query_result_ids[0][i]) + ",";
+    const std::vector<uint32_t>& final_ids = query_result_ids[0];
+    std::ostringstream id_log_stream;
+    for (size_t i = 0; i < final_ids.size(); ++i) {
+      if (i != 0) {
+        id_log_stream << ',';
+      }
+      id_log_stream << final_ids[i];
     }
-    std::cout << "【sever】get final ids:" << final_result_ids_str << std::endl;
+    std::cout << "【sever】get final ids:" << id_log_stream.str() << std::endl;
 
     diskann::aligned_free(query);
     printf("【sever】search over\n");
 
-    // 继续socket部分
-    char* buff2 =
-        new char[topk * query_num *
-                 (ID_LENGTH +
-                  1)];  // yelp数据集有650000行，最大下标6位数，加上一个分隔符
-    final_result_ids_str.copy(
-        buff2, final_result_ids_str.length());  // 裁剪末尾的无效字符
-    buff2[final_result_ids_str.length()] = '\0';
-    send(connfd, buff2, strlen(buff2), 0);
-
-    // bzero(buff, BUFF_LEN);
-    // recv(connfd, buff, BUFF_LEN - 1, 0);
-    // printf("【sever】go?? : %s\n", buff);
-    // char buff3[] = "【sever】CTX2.................";
-    // send(connfd, buff3, strlen(buff3), 0);
+    if (!send_segmented_results(connfd, final_ids, topk, query_num)) {
+      printf("[server] failed to send search results\n");
+    }
 
     bzero(buff, BUFF_LEN);
     recv(connfd, buff, BUFF_LEN - 1, 0);
     printf("【sever】over?? : %s\n", buff);
 
     close(connfd);
-    delete[] final_result_ids;
-    delete[] buff2;
   }
   return 0;
 }

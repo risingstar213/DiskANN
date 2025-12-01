@@ -6,11 +6,193 @@
 #include "percentile_stats.h"
 #include "pq.h"
 #include "pq_scratch.h"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <iostream>
+#include <set>
+
+const int hrs[HRS_LEN] = HRS_VALUE;
+const double sp[SAMPLE_POINT_NUM][2] = SAMPLE_POINT_VALUE;
+
+#define register_hitnum_reset_nn(n, hitnum_reset_nn, recall_reset_nn_split, time_reset_n, io_reset_n,                 \
+                                 hitnum_reset_n_final, len_frf_n)                                                     \
+    if (step_num == n)                                                                                                \
+    {                                                                                                                 \
+        if (STEP_TIME)                                                                                                \
+        {                                                                                                             \
+            hitnum_reset_nn = 1;                                                                                      \
+            for (int cnt = 0; cnt < SAMPLE_POINT_NUM; cnt++)                                                          \
+                recall_reset_nn_split[cnt] = 1;                                                                       \
+            auto end_ts = std::chrono::system_clock::now();                                                           \
+            auto last = std::chrono::duration_cast<std::chrono::microseconds>(end_ts - start);                        \
+            time_reset_n = static_cast<unsigned>(last.count());                                                       \
+        }                                                                                                             \
+        else                                                                                                          \
+        {                                                                                                             \
+            io_reset_n = stats->n_ios;                                                                                \
+            if (!full_retset.empty())                                                                                 \
+            {                                                                                                         \
+                res_ids.assign(full_retset.size(), 0);                                                                \
+                for (size_t i = 0; i < full_retset.size(); i++)                                                       \
+                {                                                                                                     \
+                    res_ids[i] = full_retset[i].id;                                                                   \
+                }                                                                                                     \
+                res.clear();                                                                                          \
+                res.insert(res_ids.begin(), res_ids.end());                                                           \
+                hitnum_reset_nn = 0;                                                                                  \
+                for (auto &v : gt)                                                                                    \
+                {                                                                                                     \
+                    if (res.find(v) != res.end())                                                                     \
+                    {                                                                                                 \
+                        hitnum_reset_nn++;                                                                            \
+                    }                                                                                                 \
+                }                                                                                                     \
+                for (int cnt = 0; cnt < SAMPLE_POINT_NUM; cnt++)                                                      \
+                {                                                                                                     \
+                    res.clear();                                                                                      \
+                    size_t start_idx = std::min(res_ids.size(),                                                       \
+                                               static_cast<size_t>(cur_list_size * sp[cnt][0]));                      \
+                    size_t end_idx = std::min(res_ids.size(),                                                         \
+                                             static_cast<size_t>(cur_list_size * sp[cnt][1]));                        \
+                    auto start_it = res_ids.begin() + start_idx;                                                      \
+                    auto end_it = res_ids.begin() + end_idx;                                                          \
+                    res.insert(start_it, end_it);                                                                     \
+                    recall_reset_nn_split[cnt] = 0;                                                                   \
+                    for (auto &v : gt)                                                                                \
+                    {                                                                                                 \
+                        if (res.find(v) != res.end())                                                                 \
+                        {                                                                                             \
+                            recall_reset_nn_split[cnt]++;                                                             \
+                        }                                                                                             \
+                    }                                                                                                 \
+                }                                                                                                     \
+            }                                                                                                         \
+            len_frf_n = static_cast<unsigned>(full_retset_final_ids.size());                                          \
+            if (!full_retset_final_ids.empty())                                                                       \
+            {                                                                                                         \
+                res_ids.assign(full_retset_final_ids.begin(), full_retset_final_ids.end());                           \
+                res.clear();                                                                                          \
+                res.insert(res_ids.begin(), res_ids.end());                                                           \
+                hitnum_reset_n_final = 0;                                                                             \
+                for (auto &v : gt)                                                                                    \
+                {                                                                                                     \
+                    if (res.find(v) != res.end())                                                                     \
+                    {                                                                                                 \
+                        hitnum_reset_n_final++;                                                                       \
+                    }                                                                                                 \
+                }                                                                                                     \
+            }                                                                                                         \
+        }                                                                                                             \
+    }
+
+#define register_hitnum_reset_nn_after(n, hitnum_reset_nn, recall_reset_nn_split, time_reset_n, io_reset_n,          \
+                                       hitnum_reset_n_final, len_frf_n)                                               \
+    if (step_num < n)                                                                                                \
+    {                                                                                                                 \
+        if (STEP_TIME)                                                                                                \
+        {                                                                                                             \
+            hitnum_reset_nn = 1;                                                                                      \
+            for (int cnt = 0; cnt < SAMPLE_POINT_NUM; cnt++)                                                          \
+                recall_reset_nn_split[cnt] = 1;                                                                       \
+            auto end_ts = std::chrono::system_clock::now();                                                           \
+            auto last = std::chrono::duration_cast<std::chrono::microseconds>(end_ts - start);                        \
+            time_reset_n = static_cast<unsigned>(last.count());                                                       \
+        }                                                                                                             \
+        else                                                                                                          \
+        {                                                                                                             \
+            io_reset_n = stats->n_ios;                                                                                \
+            res_ids.assign(retset.size(), 0);                                                                         \
+            for (size_t i = 0; i < retset.size(); i++)                                                                \
+            {                                                                                                         \
+                res_ids[i] = retset[i].id;                                                                            \
+            }                                                                                                         \
+            res.clear();                                                                                              \
+            res.insert(res_ids.begin(), res_ids.end());                                                               \
+            hitnum_reset_nn = 0;                                                                                      \
+            for (auto &v : gt)                                                                                        \
+            {                                                                                                         \
+                if (res.find(v) != res.end())                                                                         \
+                {                                                                                                     \
+                    hitnum_reset_nn++;                                                                                \
+                }                                                                                                     \
+            }                                                                                                         \
+            if (!full_retset_final_ids.empty())                                                                       \
+            {                                                                                                         \
+                res_ids.assign(full_retset_final_ids.begin(), full_retset_final_ids.end());                           \
+                res.clear();                                                                                          \
+                res.insert(res_ids.begin(), res_ids.end());                                                           \
+                hitnum_reset_n_final = 0;                                                                             \
+                for (auto &v : gt)                                                                                    \
+                {                                                                                                     \
+                    if (res.find(v) != res.end())                                                                     \
+                    {                                                                                                 \
+                        hitnum_reset_n_final++;                                                                       \
+                    }                                                                                                 \
+                }                                                                                                     \
+            }                                                                                                         \
+            len_frf_n = static_cast<unsigned>(full_retset_final_ids.size());                                          \
+            if (!full_retset_final_ids.empty())                                                                       \
+            {                                                                                                         \
+                for (int cnt = 0; cnt < SAMPLE_POINT_NUM; cnt++)                                                      \
+                {                                                                                                     \
+                    size_t start_idx =                                                                                \
+                        std::min(full_retset_final_ids.size(),                                                        \
+                                 static_cast<size_t>(cur_list_size * sp[cnt][0]));                                    \
+                    size_t end_idx =                                                                                  \
+                        std::min(full_retset_final_ids.size(),                                                        \
+                                 static_cast<size_t>(cur_list_size * sp[cnt][1]));                                    \
+                    auto start_it = full_retset_final_ids.begin() + start_idx;                                       \
+                    auto end_it = full_retset_final_ids.begin() + end_idx;                                            \
+                    res.clear();                                                                                      \
+                    res.insert(start_it, end_it);                                                                     \
+                    recall_reset_nn_split[cnt] = 0;                                                                   \
+                    for (auto &v : gt)                                                                                \
+                    {                                                                                                 \
+                        if (res.find(v) != res.end())                                                                 \
+                        {                                                                                             \
+                            recall_reset_nn_split[cnt]++;                                                             \
+                        }                                                                                             \
+                    }                                                                                                 \
+                }                                                                                                     \
+            }                                                                                                         \
+        }                                                                                                             \
+    }
+
+#ifdef PRINT_PATH
+#define print_reset()                                                                                                  \
+    if (print_flag)                                                                                                    \
+    {                                                                                                                 \
+        std::cout << "retset:";                                                                                      \
+        for (size_t i = 0; i < retset.size(); i++)                                                                     \
+        {                                                                                                             \
+            std::cout << retset[i].id << " ";                                                                        \
+        }                                                                                                             \
+        std::cout << std::endl;                                                                                        \
+    }
+
+#define print_fullreset()                                                                                              \
+    if (print_flag)                                                                                                    \
+    {                                                                                                                 \
+        std::cout << "full_rst:[size=" << full_retset.size() << "]:";                                              \
+        for (auto &i : full_retset)                                                                                    \
+        {                                                                                                             \
+            std::cout << i.id << " ";                                                                                \
+        }                                                                                                             \
+        std::cout << std::endl << std::endl;                                                                           \
+    }
+#else
+#define print_reset()
+#define print_fullreset()
+#endif
 
 // Macros for reordering data access - same as in pq_flash_index.cpp
+#ifndef VECTOR_SECTOR_NO
 #define VECTOR_SECTOR_NO(id) (((uint64_t)(id)) / this->_nvecs_per_sector + this->_reorder_data_start_sector)
+#endif
+#ifndef VECTOR_SECTOR_OFFSET
 #define VECTOR_SECTOR_OFFSET(id) ((((uint64_t)(id)) % this->_nvecs_per_sector) * this->_data_dim * sizeof(T))
+#endif
 
 namespace diskann {
 
@@ -98,7 +280,6 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
     // Get thread data - same as original
     ScratchStoreManager<SSDThreadData<T>> manager(this->_thread_data);
     auto data = manager.scratch_space();
-    IOContext &ctx = data->ctx;
     auto query_scratch = &(data->scratch);
     auto pq_query_scratch = query_scratch->pq_scratch();
     
@@ -162,11 +343,50 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
     };
     
     Timer query_timer, io_timer, cpu_timer;
+    auto start = std::chrono::system_clock::now();
     
     tsl::robin_set<uint64_t> &visited = query_scratch->visited;
     NeighborPriorityQueue &retset = query_scratch->retset;
     retset.reserve(l_search);
     std::vector<Neighbor> &full_retset = query_scratch->full_retset;
+    std::vector<Neighbor> full_retset_final;
+    full_retset_final.reserve(4096);
+    std::vector<uint32_t> full_retset_final_ids;
+    full_retset_final_ids.reserve(4096);
+    std::vector<uint32_t> res_ids;
+    res_ids.reserve(static_cast<size_t>(l_search + 1));
+
+    bool gt_flag = false;
+    std::set<unsigned> gt;
+    std::set<unsigned> res;
+    if (stats != nullptr && stats->gold_std != nullptr && stats->recall_at > 0 && stats->dim_gs > 0)
+    {
+        gt_flag = true;
+        unsigned *gt_vec = stats->gold_std + static_cast<size_t>(stats->dim_gs) * stats->queries_id;
+        size_t tie_breaker = stats->recall_at;
+        if (stats->gs_dist != nullptr && stats->recall_at > 0)
+        {
+            tie_breaker = stats->recall_at - 1;
+            float *gt_dist_vec = stats->gs_dist + static_cast<size_t>(stats->dim_gs) * stats->queries_id;
+            while (tie_breaker < stats->dim_gs && gt_dist_vec[tie_breaker] == gt_dist_vec[stats->recall_at - 1])
+            {
+                tie_breaker++;
+            }
+        }
+        tie_breaker = std::min<size_t>(tie_breaker, stats->dim_gs);
+        gt.insert(gt_vec, gt_vec + tie_breaker);
+    }
+
+    unsigned step_num = 0;
+    unsigned next_step_po = 1;
+    unsigned updata_lastpos = 0;
+    float award = 0.0f;
+    bool prefetch_over = false;
+    bool force_terminate = false;
+    const bool use_cache = true;
+    int cache_hitnum = 0;
+    unsigned cur_list_size = 0;
+    const bool print_flag = false;
     
     // Find best medoid - exactly same as original
     uint32_t best_medoid = 0;
@@ -217,6 +437,8 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
     cached_nhoods.reserve(2 * beam_width);
     
     while (retset.has_unexpanded_node() && num_ios < io_limit) {
+        print_reset();
+        print_fullreset();
         // Clear iteration state - same as original
         frontier.clear();
         frontier_nhoods.clear();
@@ -245,6 +467,11 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
             }
         }
         
+        if (use_cache)
+        {
+            cache_hitnum += static_cast<int>(cached_nhoods.size());
+        }
+
         // Read nhoods of frontier ids - ASYNC VERSION
         if (!frontier.empty()) {
             if (stats != nullptr) {
@@ -295,7 +522,7 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
                     cur_expanded_dist = this->_disk_pq_table.l2_distance(query_float, (uint8_t *)node_fp_coords_copy);
                 }
             }
-            full_retset.push_back(Neighbor((uint32_t)cached_nhood.first, cur_expanded_dist));
+            full_retset.push_back(Neighbor((uint32_t)cached_nhood.first, cur_expanded_dist, true));
             
             uint64_t nnbrs = cached_nhood.second.first;
             uint32_t *node_nbrs = cached_nhood.second.second;
@@ -345,7 +572,7 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
                     cur_expanded_dist = this->_disk_pq_table.l2_distance(query_float, (uint8_t *)data_buf);
                 }
             }
-            full_retset.push_back(Neighbor(frontier_nhood.first, cur_expanded_dist));
+            full_retset.push_back(Neighbor(frontier_nhood.first, cur_expanded_dist, true));
             
             uint32_t *node_nbrs = (node_buf + 1);
             // Compute node_nbrs <-> query dist in PQ space - same as original
@@ -379,16 +606,173 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
                 }
             }
             
-            if (stats != nullptr) {
+            if (stats != nullptr)
+            {
                 stats->cpu_us += (float)cpu_timer.elapsed();
             }
         }
-        
+
+        cur_list_size = static_cast<unsigned>(retset.size());
         hops++;
+        step_num++;
+
+        if (FULL_RETSET_SWAP)
+        {
+            std::sort(full_retset.begin(), full_retset.end());
+            if (step_num > (k_search / beam_width + 1))
+            {
+                for (size_t i = 0; i < full_retset.size(); i++)
+                {
+                    full_retset[i].remain_step++;
+                    full_retset[i].remain_pos += static_cast<unsigned>(i);
+                }
+            }
+        }
+
+        if (stats != nullptr && gt_flag)
+        {
+            if (FULL_RETSET_SWAP)
+            {
+                float stable = 0.0f;
+                for (size_t i = 0; i < full_retset.size() && i < k_search; i++)
+                {
+                    if (full_retset[i].last_pos == i)
+                    {
+                        stable += 1.0f;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                int addnum = 0;
+                bool changed = false;
+                if (stable > 0.33f * static_cast<float>(k_search) && step_num == next_step_po)
+                {
+                    float old_award = award;
+                    if (!full_retset_final_ids.empty())
+                    {
+                        award = 0.0f;
+                        size_t remove_num = 0;
+                        for (size_t i = 0; i < full_retset_final_ids.size(); i++)
+                        {
+                            bool mismatch = (i >= full_retset.size()) ||
+                                            (full_retset_final_ids[i] != full_retset[i].id);
+                            if (mismatch)
+                            {
+                                prefetch_over = false;
+                                full_retset_final_ids.erase(full_retset_final_ids.begin() + static_cast<long>(i - remove_num));
+                                full_retset_final.erase(full_retset_final.begin() + static_cast<long>(i - remove_num));
+                                remove_num++;
+                                changed = true;
+                            }
+                        }
+                        award = 0.5f * (stable - static_cast<float>(4 * remove_num)) + 0.5f * old_award;
+                    }
+
+                    addnum = static_cast<int>((stable - static_cast<float>(full_retset_final_ids.size()) + award) / 2.0f);
+
+                    for (size_t i = 0; i < full_retset.size() && i < k_search && addnum > 0; i++)
+                    {
+                        if (full_retset[i].remain_step > (k_search / beam_width + 1) && full_retset[i].last_pos == i)
+                        {
+                            if (std::find(full_retset_final_ids.begin(), full_retset_final_ids.end(), full_retset[i].id) ==
+                                full_retset_final_ids.end())
+                            {
+                                full_retset_final_ids.push_back(full_retset[i].id);
+                                full_retset_final.push_back(
+                                    Neighbor(full_retset[i].id, full_retset[i].distance, full_retset[i].flag));
+                                addnum--;
+                                changed = true;
+                            }
+                        }
+
+                        if (full_retset_final_ids.size() >= k_search)
+                        {
+                            if (prefetch_over)
+                            {
+                                force_terminate = true;
+                            }
+                            else
+                            {
+                                prefetch_over = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                if (changed)
+                {
+                    if (use_cache)
+                        std::cout << stats->n_ios + cache_hitnum / 2 << "," << full_retset_final_ids.size() << ",";
+                    else
+                        std::cout << stats->n_ios << "," << full_retset_final_ids.size() << ",";
+                }
+
+                if (step_num == next_step_po)
+                {
+                    double fraction = (k_search == 0) ? 0.0 : (static_cast<double>(full_retset_final_ids.size()) / k_search);
+                    next_step_po = static_cast<unsigned>(step_num + fraction * full_retset_final_ids.size() + 1);
+                    if (award < 0)
+                    {
+                        next_step_po += static_cast<unsigned>(-award);
+                    }
+                    updata_lastpos += 1;
+                    if (updata_lastpos % 1 == 0)
+                    {
+                        for (size_t i = 0; i < full_retset.size(); i++)
+                        {
+                            full_retset[i].last_pos = static_cast<unsigned>(i);
+                        }
+                    }
+                }
+            }
+            for (int i = 0; i < HRS_LEN; i++)
+            {
+                register_hitnum_reset_nn(hrs[i], stats->hitnum_reset_n[i], stats->hitnum_reset_n_split[i],
+                                         stats->time_reset_n[i], stats->io_reset_n[i],
+                                         stats->hitnum_reset_n_final[i], stats->len_frf_n[i]);
+            }
+        }
+
+        if (force_terminate)
+        {
+            break;
+        }
     }
     
+    if (stats != nullptr && gt_flag)
+    {
+        for (int i = 0; i < HRS_LEN; i++)
+        {
+            register_hitnum_reset_nn_after(hrs[i], stats->hitnum_reset_n[i], stats->hitnum_reset_n_split[i],
+                                           stats->time_reset_n[i], stats->io_reset_n[i],
+                                           stats->hitnum_reset_n_final[i], stats->len_frf_n[i]);
+        }
+    }
+
     // Re-sort by distance - same as original
     std::sort(full_retset.begin(), full_retset.end());
+
+    if (FULL_RETSET_SWAP)
+    {
+        for (auto &nb : full_retset)
+        {
+            if (full_retset_final_ids.size() >= k_search)
+            {
+                break;
+            }
+            if (std::find(full_retset_final_ids.begin(), full_retset_final_ids.end(), nb.id) ==
+                full_retset_final_ids.end())
+            {
+                full_retset_final_ids.push_back(nb.id);
+                full_retset_final.push_back(nb);
+            }
+        }
+        full_retset_final.swap(full_retset);
+    }
     
     if (use_reorder_data) {
         if (!(this->_reorder_data_exists)) {
@@ -460,6 +844,8 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
     
     if (stats != nullptr) {
         stats->total_us = (float)query_timer.elapsed();
+        stats->n_steps = step_num;
+        stats->visited_length = static_cast<unsigned>(visited.size());
     }
     
     co_return;

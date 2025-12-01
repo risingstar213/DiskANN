@@ -3,18 +3,49 @@
 
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <functional>
 #ifdef _WINDOWS
 #include <numeric>
 #endif
-#include <string>
 #include <vector>
+#include <algorithm>
+#include <cmath>
 
-#include "distance.h"
-#include "parameters.h"
+#ifndef SAMPLE_POINT_NUM
+#define SAMPLE_POINT_NUM 10
+#endif
+
+#ifndef SAMPLE_POINT_VALUE
+#define SAMPLE_POINT_VALUE                                                                                              \
+    {                                                                                                                   \
+        {0.0, 0.1}, {0.0, 0.2}, {0.0, 0.3}, {0.0, 0.4}, {0.0, 0.5}, {0.0, 0.6}, {0.0, 0.7}, {0.0, 0.8}, {0.0, 0.9},      \
+            {0.0, 1.0}                                                                                                  \
+    }
+#endif
+
+#ifndef HRS_LEN
+#define HRS_LEN 24
+#endif
+
+#ifndef HRS_VALUE
+#define HRS_VALUE                                                                                                       \
+    {                                                                                                                   \
+        2, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 80, 96, 112, 128, 144, 160, 192, 224, 256, 288, 336             \
+    }
+#endif
+
+#ifndef STEP_TIME
+#define STEP_TIME false
+#endif
+
+#ifndef STEP_IO
+#define STEP_IO true
+#endif
+
+#ifndef FULL_RETSET_SWAP
+#define FULL_RETSET_SWAP true
+#endif
 
 namespace diskann
 {
@@ -33,6 +64,21 @@ struct QueryStats
     unsigned n_cmps = 0;       // # cmps
     unsigned n_cache_hits = 0; // # cache_hits
     unsigned n_hops = 0;       // # search hops
+
+    unsigned queries_id = 0;
+    unsigned *gold_std = nullptr;
+    float *gs_dist = nullptr;
+    unsigned dim_gs = 0;
+    unsigned recall_at = 0;
+    unsigned visited_length = 0;
+    unsigned n_steps = 0;
+    unsigned hitnum_reset_n[HRS_LEN > 0 ? HRS_LEN : 1] = {0};
+    unsigned hitnum_reset_n_final[HRS_LEN > 0 ? HRS_LEN : 1] = {0};
+    unsigned time_reset_n[HRS_LEN > 0 ? HRS_LEN : 1] = {0};
+    unsigned io_reset_n[HRS_LEN > 0 ? HRS_LEN : 1] = {0};
+    unsigned len_frf_n[HRS_LEN > 0 ? HRS_LEN : 1] = {0};
+    unsigned hitnum_reset_n_split[HRS_LEN > 0 ? HRS_LEN : 1]
+                                   [SAMPLE_POINT_NUM > 0 ? SAMPLE_POINT_NUM : 1] = {{0}};
 };
 
 template <typename T>
