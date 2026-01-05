@@ -1479,7 +1479,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             }
             else
             {
-                float ratio = (streaming->first_stage_fraction <= 0.0f) ? 0.5f : streaming->first_stage_fraction;
+                float ratio = (streaming->first_stage_fraction <= 0.0f) ? 0.2f : streaming->first_stage_fraction;
                 auto tentative = static_cast<uint32_t>(
                     std::ceil(ratio * static_cast<float>(std::min<uint64_t>(k_search, capped_k))));
                 stage_one_target = std::min<uint32_t>(static_cast<uint32_t>(k_search), std::max<uint32_t>(tentative, 1u));

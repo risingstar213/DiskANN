@@ -336,7 +336,7 @@ int main() {
     if (streaming_active)
     {
       stream_opts.stage_count = 2;
-      stream_opts.first_stage_min_results = static_cast<uint32_t>(std::max(1, topk / 2));
+      stream_opts.first_stage_min_results = 0;
       stream_opts.min_ios_before_emit = 2;
       stream_opts.min_steps_before_emit = 2;
       stream_opts.user_context = &stage_writer;

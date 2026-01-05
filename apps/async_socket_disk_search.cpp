@@ -48,7 +48,7 @@ constexpr std::string_view kDataTypeName{"float"};
 using DataType = float;
 constexpr std::string_view kDistanceFunction{"l2"};
 constexpr std::string_view kIndexPathPrefix{
-    "/mnt/dataset/wiki_dpr/disk_index_wiki_dpr_base_R128_L256_A1.2"};
+    "/mnt/dataset/wiki_dpr_new/disk_index_wiki_dpr_base_R128_L256_A1.2"};
 
 constexpr uint32_t kBeamWidth = 64;
 constexpr uint32_t kVectorDim = 768;
@@ -767,7 +767,7 @@ void handle_client_connection(int connfd, const AsyncIndexPtr& async_index,
     diskann::SearchStreamOptions stream_opts{};
     if (streaming_active) {
       stream_opts.stage_count = 2;
-      stream_opts.first_stage_min_results = static_cast<uint32_t>(std::max(1, payload.request.topk / 2));
+      stream_opts.first_stage_min_results = 0;
       stream_opts.min_ios_before_emit = 2;
       stream_opts.min_steps_before_emit = 2;
       stream_opts.user_context = &stage_writer;
