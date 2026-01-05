@@ -12,7 +12,7 @@ static int io_submit_hit(io_context_t ctx, long nr, struct iocb **iocbpp,
 }
 
 LibAioWrapper::LibAioWrapper(unsigned entries) {
-    memset(&ctx_, 0, sizeof(ctx_));
+    memset(&ctx_, 0, sizeof(io_context_t));
     if (io_setup(entries, &ctx_) < 0) {
         throw std::runtime_error("io_setup failed");
     }

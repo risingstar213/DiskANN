@@ -38,5 +38,7 @@ private:
     std::vector<PendingRead> pending_reads_;
 
     std::unique_ptr<struct iocb[]> iocb_bufs_;
+#ifdef ENABLE_HITCHHIKE
     std::unique_ptr<struct hitchhiker[]> hitchhike_bufs_;
+#endif
 };

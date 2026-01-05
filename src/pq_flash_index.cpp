@@ -794,7 +794,7 @@ int PQFlashIndex<T, LabelT>::load_from_separate_paths(uint32_t num_threads, uint
 
     if (pq_file_num_centroids != 256)
     {
-        diskann::cout << "Error. Number of PQ centroids is not 256. Exiting." << std::endl;
+        diskann::cout << " 256. Found: " << pq_file_num_centroids << " Exiting." << std::endl;
         return -1;
     }
 
