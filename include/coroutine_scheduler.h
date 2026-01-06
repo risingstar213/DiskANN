@@ -4,12 +4,15 @@
 #pragma once
 
 #include <coroutine>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <queue>
 #include <thread>
 #include <atomic>
 #include <stdexcept>
+#include <mutex>
+#include <deque>
 #include "async_io.h"
 #include "io_ring_wrapper.h"
 #include <vector>
@@ -161,14 +164,27 @@ struct Task<void> {
 struct IOAwaitable {
     struct io_uring_sqe* sqe;
     int result;
-    bool ready = false;
-    std::coroutine_handle<> waiting_coroutine;
+    std::atomic<uint8_t> status = Status::PENDING;
+    std::atomic<std::coroutine_handle<>> waiting_coroutine{std::coroutine_handle<>()};
+
+    enum Status : uint8_t {
+        PENDING = 0,
+        WAITING = 1,
+        COMPLETED = 2
+    };
     
-    IOAwaitable(struct io_uring_sqe* s) : sqe(s) {}
+    IOAwaitable(struct io_uring_sqe* s) : sqe(s), result(0), status(PENDING), waiting_coroutine(std::coroutine_handle<>()) {}
+
+    // copy
+    IOAwaitable(const IOAwaitable& other) : sqe(other.sqe), result(other.result), status(other.status.load()), waiting_coroutine(std::coroutine_handle<>()) {}
+    IOAwaitable(IOAwaitable &&other) : sqe(other.sqe), result(other.result), status(other.status.load()), waiting_coroutine(std::coroutine_handle<>()) {}
     
-    bool await_ready() const noexcept { return ready; }
+    bool await_ready() noexcept {
+        uint8_t expected = PENDING;
+        return !status.compare_exchange_strong(expected, WAITING);
+    }
     void await_suspend(std::coroutine_handle<> h) noexcept {
-        waiting_coroutine = h;
+        waiting_coroutine.store(h, std::memory_order_release);
     }
     int await_resume() const noexcept {
         return result;
@@ -193,7 +209,7 @@ public:
     void stop();
 
     // Schedule multiple async read operations
-    std::vector<IOAwaitable> async_read_batch(
+    Task<std::vector<IOAwaitable>> async_read_batch(
         int fd,
         const std::vector<AlignedRead>& reads
     );
@@ -201,9 +217,22 @@ public:
     // Add a coroutine to the ready queue
     void schedule_coroutine(std::coroutine_handle<> coro);
 
+    void set_pending_cnts(uint32_t cnt) {
+        pending_cnts_.store(cnt, std::memory_order_relaxed);
+    }
+
+    // WARNING!!! 目前为了简化设计，应用手动设置和减少计数，之后可改为自动管理
+    void mark_done() {
+        pending_cnts_.fetch_sub(1, std::memory_order_relaxed);
+    }
+
 private:
+    std::thread io_thread_;
     std::unique_ptr<AsyncIO> io_backend_;
     std::atomic<bool> running{false};
+    std::atomic<size_t> pending_io_{0};
+
+    std::mutex ready_mutex_;
     std::queue<std::coroutine_handle<>> ready_queue_;
     // 合并pending_ops和pending_counts为一个结构
     struct PendingEntry {
@@ -211,14 +240,29 @@ private:
         size_t remaining = 0; // 待完成计数
     };
     std::unordered_map<uint64_t, PendingEntry> pending_ops_;  // op_id -> entry
-    std::mutex ready_mutex_;
+
+    struct PendingSubmission {
+        int fd;
+        AlignedRead read;
+        IOAwaitable* awaitable;
+    };
+
+    std::mutex submission_mutex_;
+    std::deque<PendingSubmission> submission_queue_;
+
+    // 跟踪协程执行
+    std::atomic<uint32_t> pending_cnts_{0};
+
+    void io_thread_loop();
+    void enqueue_read_requests(int fd, const std::vector<AlignedRead>& reads, std::vector<IOAwaitable>& awaitables);
+    void drain_submission_queue();
 
     void process_completions();
-    void execute_ready_coroutines();
+    bool execute_ready_coroutines();
 };
 
 // Thread-local scheduler instance for multi-threading isolation
-extern thread_local std::unique_ptr<CoroutineScheduler> g_scheduler;
+extern std::unique_ptr<CoroutineScheduler> g_scheduler;
 
 // Helper to get the scheduler
 inline CoroutineScheduler* get_cor_scheduler() {

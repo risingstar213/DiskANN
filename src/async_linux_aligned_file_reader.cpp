@@ -114,7 +114,7 @@ diskann::Task<void> AsyncLinuxAlignedFileReader::async_read_coro(std::vector<Ali
     }
     
     // Submit all reads asynchronously
-    std::vector<diskann::IOAwaitable> awaitables = scheduler->async_read_batch(file_desc, read_reqs);
+    std::vector<diskann::IOAwaitable> awaitables = co_await scheduler->async_read_batch(file_desc, read_reqs);
     
     // Wait for all reads to complete
     for (auto &awaitable : awaitables) {
@@ -143,7 +143,7 @@ diskann::Task<std::vector<int>> AsyncLinuxAlignedFileReader::async_read_batch(st
     }
     
     // Submit all reads asynchronously
-    std::vector<diskann::IOAwaitable> awaitables = scheduler->async_read_batch(file_desc, read_reqs);
+    std::vector<diskann::IOAwaitable> awaitables = co_await scheduler->async_read_batch(file_desc, read_reqs);
     
     std::vector<int> results;
     results.reserve(awaitables.size());

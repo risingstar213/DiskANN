@@ -63,6 +63,9 @@ diskann::Task<void> async_single_search(
         beamwidth, filtered_search, filter_label, 
         std::numeric_limits<uint32_t>::max(), 
         use_reorder_data, stats);
+
+    diskann::get_cor_scheduler()->mark_done();
+    co_return;
 }
 
 // 主搜索函数 - 仿照 search_disk_index 的结构

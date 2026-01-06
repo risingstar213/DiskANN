@@ -284,6 +284,9 @@ diskann::Task<void> async_single_search(const AsyncIndexPtr& index,
       query, topk, L, result_ids, result_dists, kBeamWidth, false,
       static_cast<uint32_t>(0), std::numeric_limits<uint32_t>::max(),
   kUseReorderData, stats, streaming);
+
+  diskann::get_cor_scheduler()->mark_done();
+  co_return;
 }
 
 void validate_configuration(diskann::Metric metric) {

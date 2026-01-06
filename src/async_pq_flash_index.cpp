@@ -215,6 +215,8 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_cached_beam_search(
     co_await async_search_impl(query1, k_search, l_search, indices, distances, 
                               beam_width, use_filter, filter_label, io_limit, 
                               use_reorder_data, stats, streaming);
+
+    co_return;
 }
 
 template <typename T, typename LabelT>
@@ -272,6 +274,8 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_batch_search(
     for (auto &task : search_tasks) {
         co_await task;
     }
+
+    co_return;
 }
 
 template <typename T, typename LabelT>
