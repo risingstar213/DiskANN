@@ -219,7 +219,8 @@ public:
         return *reinterpret_cast<const value_type*>(std::addressof(m_value));
     }
     
-    distance_type dist_from_ideal_bucket() const noexcept {
+    __attribute__((always_inline))
+    inline distance_type dist_from_ideal_bucket() const noexcept {
         return m_dist_from_ideal_bucket;
     }
     

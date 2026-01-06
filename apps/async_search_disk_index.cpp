@@ -28,7 +28,7 @@
 #endif
 
 #define WARMUP false
-#define COROUTINES_PER_THREAD 1
+#define COROUTINES_PER_THREAD 20
 
 namespace po = boost::program_options;
 
@@ -96,6 +96,7 @@ int async_search_disk_index(diskann::Metric &metric, const std::string &index_pa
     bool filtered_search = false;
     if (!query_filters.empty())
     {
+        printf("Using filtered search\n");
         filtered_search = true;
         if (query_filters.size() != 1 && query_filters.size() != query_num)
         {
@@ -104,6 +105,8 @@ int async_search_disk_index(diskann::Metric &metric, const std::string &index_pa
                       << std::endl;
             return -1;
         }
+    } else {
+        printf("Not using filtered search\n");
     }
 
     bool calc_recall_flag = false;

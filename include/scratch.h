@@ -9,6 +9,7 @@
 // #include "boost/dynamic_bitset.hpp"
 #include "tsl/robin_set.h"
 #include "tsl/robin_map.h"
+#include "tsl/sparse_set.h"
 #include "tsl/sparse_map.h"
 
 #include "aligned_file_reader.h"

@@ -134,7 +134,7 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
 
   protected:
     DISKANN_DLLEXPORT void use_medoids_data_as_centroids();
-    DISKANN_DLLEXPORT void setup_thread_data(uint64_t nthreads, uint64_t coroutines_per_thread = 1, uint64_t visited_reserve = 4096);
+    DISKANN_DLLEXPORT void setup_thread_data(uint64_t nthreads, uint64_t coroutines_per_thread = 1, uint64_t visited_reserve = 16384);
 
     DISKANN_DLLEXPORT void set_universal_label(const LabelT &label);
 

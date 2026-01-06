@@ -1131,6 +1131,8 @@ int PQFlashIndex<T, LabelT>::load_from_separate_paths(uint32_t num_threads, uint
         }
     }
 
+    printf("dummy pts size: %zu, has dummy pts size: %zu\n", _dummy_pts.size(), _has_dummy_pts.size());
+
 #ifdef EXEC_ENV_OLS
     _pq_table.load_pq_centroid_bin(files, pq_table_bin.c_str(), nchunks_u64);
 #else

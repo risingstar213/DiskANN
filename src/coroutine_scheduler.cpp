@@ -90,8 +90,8 @@ std::vector<IOAwaitable> CoroutineScheduler::async_read_batch(
 #endif
 
         if (entry.awaitables.size() >= 120) {
-            printf("[CoroutineScheduler] Warning: Large batch size for op_id %lu: %zu\n",
-                   op_id, entry.awaitables.size());
+            // printf("[CoroutineScheduler] Warning: Large batch size for op_id %lu: %zu\n",
+            //        op_id, entry.awaitables.size());
             io_backend_->flush_batch(); // 防止计数过大
         }
     }
