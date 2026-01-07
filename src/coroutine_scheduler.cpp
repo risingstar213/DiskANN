@@ -22,8 +22,8 @@ std::unique_ptr<CoroutineScheduler> g_scheduler = nullptr;
 
 CoroutineScheduler::CoroutineScheduler() {
     // Default backend: io_uring
-    // io_backend_ = std::make_unique<IoRingWrapper>(MAX_ENTRIES, 0);
-    io_backend_ = std::make_unique<LibAioWrapper>(MAX_ENTRIES);
+    io_backend_ = std::make_unique<IoRingWrapper>(MAX_ENTRIES, 0);
+    // io_backend_ = std::make_unique<LibAioWrapper>(MAX_ENTRIES);
 }
 
 
@@ -88,14 +88,14 @@ void YieldAwaitable::await_suspend(std::coroutine_handle<> handle) noexcept {
     }
 }
 
-Task<std::vector<IOAwaitable>> CoroutineScheduler::async_read_batch(
+std::vector<IOAwaitable> CoroutineScheduler::async_read_batch(
     int fd,
     const std::vector<AlignedRead>& reads) {
     std::vector<IOAwaitable> awaitables;
     awaitables.reserve(reads.size());
     enqueue_read_requests(fd, reads, awaitables);
 
-    co_return awaitables;
+    return awaitables;
 }
 
 void CoroutineScheduler::schedule_coroutine(std::coroutine_handle<> coro) {
@@ -117,6 +117,9 @@ void CoroutineScheduler::process_completions() {
             auto &entry = it->second;
 #ifdef ENABLE_HITCHHIKE
             for (auto awaitable_ptr : entry.awaitables) {
+                if (awaitable_ptr == nullptr) {
+                    continue;
+                }
                 awaitable_ptr->result = result;
                 uint8_t desired = IOAwaitable::Status::PENDING;
                 if (!awaitable_ptr->status.compare_exchange_strong(desired, IOAwaitable::Status::COMPLETED)) {
@@ -129,7 +132,6 @@ void CoroutineScheduler::process_completions() {
                     schedule_coroutine(waiter);
                 }
             }
-            pending_io_.fetch_sub(entry.awaitables.size(), std::memory_order_relaxed);
             pending_ops_.erase(it);
 #else
             if (entry.remaining > 0) {
@@ -137,6 +139,9 @@ void CoroutineScheduler::process_completions() {
             }
             if (entry.remaining == 0) {
                 for (auto awaitable_ptr : entry.awaitables) {
+                    if (awaitable_ptr == nullptr) {
+                        continue;
+                    }
                     awaitable_ptr->result = result;  // 所有awaitable使用最后一个result
                     uint8_t desired = IOAwaitable::Status::PENDING;
                     if (!awaitable_ptr->status.compare_exchange_strong(desired, IOAwaitable::Status::COMPLETED)) {
@@ -150,7 +155,6 @@ void CoroutineScheduler::process_completions() {
                         schedule_coroutine(waiter);
                     }
                 }
-                pending_io_.fetch_sub(entry.awaitables.size(), std::memory_order_relaxed);
                 pending_ops_.erase(it);
             }
 #endif
@@ -209,17 +213,22 @@ void CoroutineScheduler::compute_thread_loop() {
 }
 
 void CoroutineScheduler::enqueue_read_requests(int fd, const std::vector<AlignedRead>& reads, std::vector<IOAwaitable>& awaitables) {
-    awaitables.reserve(reads.size());
+    awaitables.reserve(1);
 
     std::lock_guard<std::mutex> lock(submission_mutex_);
     for (size_t i = 0; i < reads.size(); ++i) {
-        awaitables.emplace_back(nullptr);
-        awaitables.back().result = 0;
-        awaitables.back().status.store(IOAwaitable::Status::PENDING, std::memory_order_relaxed);
-        awaitables.back().waiting_coroutine.store(std::coroutine_handle<>{}, std::memory_order_relaxed);
+        IOAwaitable* awaitable_ptr = nullptr;
+        if (i == reads.size() - 1) {
+            // 最后一个请求使用nullptr占位，避免多次拷贝
+            awaitables.emplace_back(IOAwaitable{});
+            awaitables.back().result = 0;
+            awaitables.back().status.store(IOAwaitable::Status::PENDING, std::memory_order_relaxed);
+            awaitables.back().waiting_coroutine.store(std::coroutine_handle<>{}, std::memory_order_relaxed);
 
-        submission_queue_.push_back(PendingSubmission{fd, reads[i], &awaitables.back()});
-        pending_io_.fetch_add(1, std::memory_order_relaxed);
+            awaitable_ptr = &awaitables.back();
+        }
+
+        submission_queue_.push_back(PendingSubmission{fd, reads[i], awaitable_ptr});
     }
 }
 
@@ -238,7 +247,9 @@ void CoroutineScheduler::drain_submission_queue() {
         uint64_t op_id = io_backend_->add_read_request(req.fd, req.read.buf, req.read.len, req.read.offset);
 
         auto &entry = pending_ops_[op_id];
-        if (entry.awaitables.empty()) entry.awaitables.reserve(64);
+        if (entry.awaitables.empty()) {
+            entry.awaitables.reserve(64);
+        }
         entry.awaitables.push_back(req.awaitable);
 
 #if !defined(ENABLE_HITCHHIKE)

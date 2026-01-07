@@ -119,15 +119,9 @@ std::vector<AsyncCompletion> IoRingWrapper::poll_completions(int max_events) {
         ac.op_id = cqe->user_data;
         ac.result = cqe->res;
         out.push_back(ac);
+        cqe_seen(cqe); // 标记为已处理
         cqe = nullptr; // reset
         got++;
-        // don't call cqe_seen here; leave caller to signal seen after processing
-        // but to mirror previous behavior we will mark seen in this adapter
-        // to keep semantics simple.
-        struct io_uring_cqe* seen_cqe;
-        if (peek_cqe(&seen_cqe) == 0 && seen_cqe) {
-            cqe_seen(seen_cqe);
-        }
     }
     return out;
 }

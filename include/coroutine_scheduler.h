@@ -162,7 +162,6 @@ struct Task<void> {
 
 // Awaitable for IO operations
 struct IOAwaitable {
-    struct io_uring_sqe* sqe;
     int result;
     std::atomic<uint8_t> status = Status::PENDING;
     std::atomic<std::coroutine_handle<>> waiting_coroutine{std::coroutine_handle<>()};
@@ -173,11 +172,11 @@ struct IOAwaitable {
         COMPLETED = 2
     };
     
-    IOAwaitable(struct io_uring_sqe* s) : sqe(s), result(0), status(PENDING), waiting_coroutine(std::coroutine_handle<>()) {}
+    IOAwaitable() : result(0), status(PENDING), waiting_coroutine(std::coroutine_handle<>()) {}
 
     // copy
-    IOAwaitable(const IOAwaitable& other) : sqe(other.sqe), result(other.result), status(other.status.load()), waiting_coroutine(std::coroutine_handle<>()) {}
-    IOAwaitable(IOAwaitable &&other) : sqe(other.sqe), result(other.result), status(other.status.load()), waiting_coroutine(std::coroutine_handle<>()) {}
+    IOAwaitable(const IOAwaitable& other) : result(other.result), status(other.status.load()), waiting_coroutine(std::coroutine_handle<>()) {}
+    IOAwaitable(IOAwaitable &&other) : result(other.result), status(other.status.load()), waiting_coroutine(std::coroutine_handle<>()) {}
     
     bool await_ready() noexcept {
         uint8_t expected = PENDING;
@@ -209,7 +208,7 @@ public:
     void stop();
 
     // Schedule multiple async read operations
-    Task<std::vector<IOAwaitable>> async_read_batch(
+    std::vector<IOAwaitable> async_read_batch(
         int fd,
         const std::vector<AlignedRead>& reads
     );
@@ -231,7 +230,6 @@ private:
     std::vector<std::thread> compute_threads_;
     std::unique_ptr<AsyncIO> io_backend_;
     std::atomic<bool> running{false};
-    std::atomic<size_t> pending_io_{0};
 
     std::mutex ready_mutex_;
     std::queue<std::coroutine_handle<>> ready_queue_;

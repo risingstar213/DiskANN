@@ -38,7 +38,7 @@ class AsyncLinuxAlignedFileReader : public AlignedFileReader
     diskann::Task<void> async_read_coro(std::vector<AlignedRead> &read_reqs);
     
     // Batch async read that returns when all reads complete
-    diskann::Task<std::vector<int>> async_read_batch(std::vector<AlignedRead> &read_reqs);
+    // diskann::Task<std::vector<int>> async_read_batch(std::vector<AlignedRead> &read_reqs);
 
 private:
     // Compatibility IOContext for legacy API

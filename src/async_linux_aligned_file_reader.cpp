@@ -114,7 +114,7 @@ diskann::Task<void> AsyncLinuxAlignedFileReader::async_read_coro(std::vector<Ali
     }
     
     // Submit all reads asynchronously
-    std::vector<diskann::IOAwaitable> awaitables = co_await scheduler->async_read_batch(file_desc, read_reqs);
+    std::vector<diskann::IOAwaitable> awaitables = scheduler->async_read_batch(file_desc, read_reqs);
     
     // Wait for all reads to complete
     for (auto &awaitable : awaitables) {
@@ -127,32 +127,32 @@ diskann::Task<void> AsyncLinuxAlignedFileReader::async_read_coro(std::vector<Ali
     co_return;
 }
 
-diskann::Task<std::vector<int>> AsyncLinuxAlignedFileReader::async_read_batch(std::vector<AlignedRead> &read_reqs) {
-    diskann::CoroutineScheduler *scheduler = diskann::get_cor_scheduler();
-    if (scheduler == nullptr) {
-        throw std::runtime_error("Coroutine scheduler not initialized. Call init_scheduler() first.");
-    }
+// diskann::Task<std::vector<int>> AsyncLinuxAlignedFileReader::async_read_batch(std::vector<AlignedRead> &read_reqs) {
+//     diskann::CoroutineScheduler *scheduler = diskann::get_cor_scheduler();
+//     if (scheduler == nullptr) {
+//         throw std::runtime_error("Coroutine scheduler not initialized. Call init_scheduler() first.");
+//     }
 
-    assert(this->file_desc != -1);
+//     assert(this->file_desc != -1);
     
-    // Validate alignment
-    for (const auto &req : read_reqs) {
-        if (!IS_ALIGNED(req.len, 512) || !IS_ALIGNED(req.offset, 512) || !IS_ALIGNED(req.buf, 512)) {
-            throw std::runtime_error("Read request not properly aligned");
-        }
-    }
+//     // Validate alignment
+//     for (const auto &req : read_reqs) {
+//         if (!IS_ALIGNED(req.len, 512) || !IS_ALIGNED(req.offset, 512) || !IS_ALIGNED(req.buf, 512)) {
+//             throw std::runtime_error("Read request not properly aligned");
+//         }
+//     }
     
-    // Submit all reads asynchronously
-    std::vector<diskann::IOAwaitable> awaitables = co_await scheduler->async_read_batch(file_desc, read_reqs);
+//     // Submit all reads asynchronously
+//     std::vector<diskann::IOAwaitable> awaitables = scheduler->async_read_batch(file_desc, read_reqs);
     
-    std::vector<int> results;
-    results.reserve(awaitables.size());
+//     std::vector<int> results;
+//     results.reserve(awaitables.size());
     
-    // Wait for all reads to complete and collect results
-    for (auto &awaitable : awaitables) {
-        int result = co_await awaitable;
-        results.push_back(result);
-    }
+//     // Wait for all reads to complete and collect results
+//     for (auto &awaitable : awaitables) {
+//         int result = co_await awaitable;
+//         results.push_back(result);
+//     }
     
-    co_return results;
-}
+//     co_return results;
+// }

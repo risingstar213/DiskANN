@@ -31,4 +31,4 @@ public:
     virtual std::vector<AsyncCompletion> poll_completions(int max_events) = 0;
 };
 
-// #define ENABLE_HITCHHIKE
+#define ENABLE_HITCHHIKE
