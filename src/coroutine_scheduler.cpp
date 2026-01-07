@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 #include "coroutine_scheduler.h"
+#include <atomic>
 #include <coroutine>
 #include <cstdio>
 #include <iostream>
@@ -21,8 +22,8 @@ std::unique_ptr<CoroutineScheduler> g_scheduler = nullptr;
 
 CoroutineScheduler::CoroutineScheduler() {
     // Default backend: io_uring
-    io_backend_ = std::make_unique<IoRingWrapper>(MAX_ENTRIES, 0);
-    // io_backend_ = std::make_unique<LibAioWrapper>(MAX_ENTRIES);
+    // io_backend_ = std::make_unique<IoRingWrapper>(MAX_ENTRIES, 0);
+    io_backend_ = std::make_unique<LibAioWrapper>(MAX_ENTRIES);
 }
 
 
@@ -38,24 +39,17 @@ void CoroutineScheduler::init() {
     }
     running = true;
     io_thread_ = std::thread([this]() { io_thread_loop(); });
+    compute_threads_.resize(5);
+    for (size_t i = 0; i < compute_threads_.size(); ++i) {
+        compute_threads_[i] = std::thread([this]() { compute_thread_loop(); });
+    }
 }
 
 void CoroutineScheduler::run() {
-    running = true;
-
-    if (!io_thread_.joinable()) {
-        io_thread_ = std::thread([this]() { io_thread_loop(); });
-    }
-
     // 这里假设所有根协程已经被加入ready_queue_中，而且没有其他协程
     this->set_pending_cnts(ready_queue_.size());
 
     while (true) {
-        bool has_ready = execute_ready_coroutines();
-        if (has_ready) {
-            continue;
-        }
-
         // 检查是否所有根协程都完成
         if (pending_cnts_.load(std::memory_order_relaxed) == 0) {
             break;
@@ -64,18 +58,19 @@ void CoroutineScheduler::run() {
         usleep(100); // 避免忙等待
     }
 
-    assert(pending_cnts_.load(std::memory_order_relaxed) == 0);
-    assert(pending_io_.load(std::memory_order_relaxed) == 0);
-    assert(submission_queue_.empty());
-    assert(ready_queue_.empty());
-    assert(pending_ops_.empty());
-    assert(io_backend_->pending_requests_count() == 0);
+    usleep(100); // 确保io线程处理完剩余的completion
 }
 
 void CoroutineScheduler::stop() {
     running = false;
     if (io_thread_.joinable()) {
         io_thread_.join();
+    }
+
+    for (auto& t : compute_threads_) {
+        if (t.joinable()) {
+            t.join();
+        }
     }
 }
 
@@ -127,9 +122,9 @@ void CoroutineScheduler::process_completions() {
                 if (!awaitable_ptr->status.compare_exchange_strong(desired, IOAwaitable::Status::COMPLETED)) {
                     awaitable_ptr->status.store(IOAwaitable::Status::COMPLETED, std::memory_order_release);
                     // 等待协程被设置
-                    auto waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_acquire);
+                    auto waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_relaxed);
                     while (waiter == std::coroutine_handle<>{}) {
-                        waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_acquire);
+                        waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_relaxed);
                     }
                     schedule_coroutine(waiter);
                 }
@@ -148,9 +143,9 @@ void CoroutineScheduler::process_completions() {
                         assert(desired == IOAwaitable::Status::WAITING);
                         awaitable_ptr->status.store(IOAwaitable::Status::COMPLETED, std::memory_order_release);
                         // 等待协程被设置
-                        auto waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_acquire);
+                        auto waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_relaxed);
                         while (waiter == std::coroutine_handle<>{}) {
-                            waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_acquire);
+                            waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_relaxed);
                         }
                         schedule_coroutine(waiter);
                     }
@@ -186,28 +181,31 @@ void CoroutineScheduler::io_thread_loop() {
         drain_submission_queue();
 
         // 共享batch提交：io线程独立决定flush时机
-        if (io_backend_->pending_requests_count() > 0) {
+        if (io_backend_->pending_requests_count() > 64) {
+            io_backend_->flush_batch();
+        }
+
+        if (io_backend_->pending_requests_count() > 0 && ready_queue_.empty()) {
             io_backend_->flush_batch();
         }
 
         process_completions();
-
-        // bool has_pending_submissions = false;
-        // {
-        //     std::lock_guard<std::mutex> lock(submission_mutex_);
-        //     has_pending_submissions = !submission_queue_.empty();
-        // }
-
-        // if (!has_pending_submissions && io_backend_->pending_requests_count() > 0) {
-        //     io_backend_->flush_batch();
-        // }
-
-        // process_completions();
     }
 
     // Drain any remaining completions before exit
     io_backend_->flush_batch();
     process_completions();
+}
+
+void CoroutineScheduler::compute_thread_loop() {
+    while (running) {
+        if (pending_cnts_.load(std::memory_order_relaxed) == 0) {
+            usleep(100); // 避免忙等待
+            continue;
+        }
+
+        execute_ready_coroutines();
+    }
 }
 
 void CoroutineScheduler::enqueue_read_requests(int fd, const std::vector<AlignedRead>& reads, std::vector<IOAwaitable>& awaitables) {
@@ -226,10 +224,11 @@ void CoroutineScheduler::enqueue_read_requests(int fd, const std::vector<Aligned
 }
 
 void CoroutineScheduler::drain_submission_queue() {
+    uint64_t backend_cnts = io_backend_->pending_requests_count();
     std::vector<PendingSubmission> local_batch;
     {
         std::lock_guard<std::mutex> lock(submission_mutex_);
-        while (!submission_queue_.empty() && local_batch.size() <= 120) {
+        while (!submission_queue_.empty() && backend_cnts + local_batch.size() <= 120) {
             local_batch.push_back(std::move(submission_queue_.front()));
             submission_queue_.pop_front();
         }

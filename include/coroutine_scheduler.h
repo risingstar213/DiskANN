@@ -184,7 +184,7 @@ struct IOAwaitable {
         return !status.compare_exchange_strong(expected, WAITING);
     }
     void await_suspend(std::coroutine_handle<> h) noexcept {
-        waiting_coroutine.store(h, std::memory_order_release);
+        waiting_coroutine.store(h, std::memory_order_relaxed);
     }
     int await_resume() const noexcept {
         return result;
@@ -228,6 +228,7 @@ public:
 
 private:
     std::thread io_thread_;
+    std::vector<std::thread> compute_threads_;
     std::unique_ptr<AsyncIO> io_backend_;
     std::atomic<bool> running{false};
     std::atomic<size_t> pending_io_{0};
@@ -254,6 +255,8 @@ private:
     std::atomic<uint32_t> pending_cnts_{0};
 
     void io_thread_loop();
+    void compute_thread_loop();
+
     void enqueue_read_requests(int fd, const std::vector<AlignedRead>& reads, std::vector<IOAwaitable>& awaitables);
     void drain_submission_queue();
 
