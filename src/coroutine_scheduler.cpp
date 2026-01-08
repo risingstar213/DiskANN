@@ -20,16 +20,51 @@ namespace diskann {
 
 std::unique_ptr<CoroutineScheduler> g_scheduler = nullptr;
 
-CoroutineScheduler::CoroutineScheduler() {
+CoroutineScheduler::CoroutineScheduler()
+    : submission_queue_(kSubmissionQueueCapacity) {
     // Default backend: io_uring
-    io_backend_ = std::make_unique<IoRingWrapper>(MAX_ENTRIES, 0);
-    // io_backend_ = std::make_unique<LibAioWrapper>(MAX_ENTRIES);
+    // io_backend_ = std::make_unique<IoRingWrapper>(MAX_ENTRIES, 0);
+    io_backend_ = std::make_unique<LibAioWrapper>(MAX_ENTRIES);
 }
 
 
 CoroutineScheduler::~CoroutineScheduler() {
     stop();
     // ring_wrapper_析构自动清理
+}
+
+CoroutineScheduler::SubmissionQueue::SubmissionQueue(size_t capacity)
+    : capacity_(capacity), buffer_(capacity) {}
+
+bool CoroutineScheduler::SubmissionQueue::enqueue(PendingSubmission&& item) {
+    size_t tail = tail_.load(std::memory_order_relaxed);
+    while (true) {
+        size_t head = head_.load(std::memory_order_acquire);
+        if (tail - head >= capacity_) {
+            return false; // queue full
+        }
+
+        if (tail_.compare_exchange_weak(
+                tail, tail + 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            Slot &slot = buffer_[tail % capacity_];
+            slot.value = std::move(item);
+            slot.ready.store(true, std::memory_order_release);
+            return true;
+        }
+    }
+}
+
+bool CoroutineScheduler::SubmissionQueue::dequeue(PendingSubmission& out) {
+    size_t head = head_.load(std::memory_order_relaxed);
+    Slot &slot = buffer_[head % capacity_];
+    if (!slot.ready.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    out = std::move(slot.value);
+    slot.ready.store(false, std::memory_order_release);
+    head_.store(head + 1, std::memory_order_release);
+    return true;
 }
 
 void CoroutineScheduler::init() {
@@ -39,7 +74,7 @@ void CoroutineScheduler::init() {
     }
     running = true;
     io_thread_ = std::thread([this]() { io_thread_loop(); });
-    compute_threads_.resize(5);
+    compute_threads_.resize(15);
     for (size_t i = 0; i < compute_threads_.size(); ++i) {
         compute_threads_[i] = std::thread([this]() { compute_thread_loop(); });
     }
@@ -181,7 +216,12 @@ bool CoroutineScheduler::execute_ready_coroutines() {
 }
 
 void CoroutineScheduler::io_thread_loop() {
-    while (running) {
+    uint32_t count = 0;
+    while (true) {
+        count += 1;
+        if (count % 1000 == 0) {
+            if (!running) break;
+        }
         drain_submission_queue();
 
         // 共享batch提交：io线程独立决定flush时机
@@ -202,7 +242,12 @@ void CoroutineScheduler::io_thread_loop() {
 }
 
 void CoroutineScheduler::compute_thread_loop() {
-    while (running) {
+    uint32_t count = 0;
+    while (true) {
+        count += 1;
+        if (count % 1000 == 0) {
+            if (!running) break;
+        }
         if (pending_cnts_.load(std::memory_order_relaxed) == 0) {
             usleep(100); // 避免忙等待
             continue;
@@ -214,8 +259,6 @@ void CoroutineScheduler::compute_thread_loop() {
 
 void CoroutineScheduler::enqueue_read_requests(int fd, const std::vector<AlignedRead>& reads, std::vector<IOAwaitable>& awaitables) {
     awaitables.reserve(1);
-
-    std::lock_guard<std::mutex> lock(submission_mutex_);
     for (size_t i = 0; i < reads.size(); ++i) {
         IOAwaitable* awaitable_ptr = nullptr;
         if (i == reads.size() - 1) {
@@ -228,19 +271,21 @@ void CoroutineScheduler::enqueue_read_requests(int fd, const std::vector<Aligned
             awaitable_ptr = &awaitables.back();
         }
 
-        submission_queue_.push_back(PendingSubmission{fd, reads[i], awaitable_ptr});
+        while (!submission_queue_.enqueue(PendingSubmission{fd, reads[i], awaitable_ptr})) {
+            std::this_thread::yield();
+        }
     }
 }
 
 void CoroutineScheduler::drain_submission_queue() {
     uint64_t backend_cnts = io_backend_->pending_requests_count();
     std::vector<PendingSubmission> local_batch;
-    {
-        std::lock_guard<std::mutex> lock(submission_mutex_);
-        while (!submission_queue_.empty() && backend_cnts + local_batch.size() <= 120) {
-            local_batch.push_back(std::move(submission_queue_.front()));
-            submission_queue_.pop_front();
-        }
+    local_batch.reserve(128);
+
+    PendingSubmission req;
+    while (backend_cnts + local_batch.size() <= 120 && submission_queue_.dequeue(req)) {
+        local_batch.push_back(std::move(req));
+        req = PendingSubmission{};
     }
 
     for (auto &req : local_batch) {

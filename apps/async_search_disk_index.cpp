@@ -28,7 +28,7 @@
 #endif
 
 #define WARMUP false
-#define COROUTINES_PER_THREAD 50
+#define COROUTINES_PER_THREAD 45
 
 namespace po = boost::program_options;
 

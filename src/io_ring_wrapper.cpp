@@ -1,4 +1,5 @@
 #include <liburing.h>
+#include <liburing/io_uring.h>
 #include "io_ring_wrapper.h"
 #include "aligned_file_reader.h" // for AlignedRead
 #include "async_io.h"

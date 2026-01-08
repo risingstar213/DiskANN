@@ -792,15 +792,15 @@ inline void load_aligned_bin_mem_impl(std::string query_vector_str, float *&data
     //               << ", aligned_dim = " << rounded_dim << "... " << std::flush;
     size_t allocSize =
         npts * rounded_dim * sizeof(float);  // 计算data需要申请的空大小间
-    diskann::cout << "allocating aligned memory of " << allocSize
-                  << " bytes... " << std::flush;
+    // diskann::cout << "allocating aligned memory of " << allocSize
+    //               << " bytes... " << std::flush;
     alloc_aligned(
         ((void**) &data), allocSize,
         8 * sizeof(
                 float));  // 为data申请大小为
                           // allocSize的空间，且地址对齐的大小为 8 * sizeof(T)
-    diskann::cout << "done. Copying data to mem_aligned buffer..."
-                  << std::flush;
+    // diskann::cout << "done. Copying data to mem_aligned buffer..."
+    //               << std::flush;
     int dims =
         std::count(query_vector_str.begin(), query_vector_str.end(), ',') /
         npts;
@@ -823,7 +823,7 @@ inline void load_aligned_bin_mem_impl(std::string query_vector_str, float *&data
       memset(data + i * rounded_dim + dim, 0,
              (rounded_dim - dim) * sizeof(float));
     }
-    diskann::cout << "|| done." << std::endl;
+    // diskann::cout << "|| done." << std::endl;
     delete[] vectors_buff;
 }
 

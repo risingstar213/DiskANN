@@ -50,14 +50,14 @@ constexpr std::string_view kDistanceFunction{"l2"};
 constexpr std::string_view kIndexPathPrefix{
     "/mnt/dataset/wiki_dpr_new/disk_index_wiki_dpr_base_R128_L256_A1.2"};
 
-constexpr uint32_t kBeamWidth = 64;
+constexpr uint32_t kBeamWidth = 50;
 constexpr uint32_t kVectorDim = 768;
 constexpr uint32_t kNumThreads = 1;
 constexpr uint32_t kNodesToCache = 0;
 constexpr uint32_t kSearchListMultiplier = 40;
 constexpr bool kUseReorderData = false;
 constexpr uint32_t kIdLength = 8;
-constexpr uint32_t kCoroutinesPerThread = 20;
+constexpr uint32_t kCoroutinesPerThread = 50;
 constexpr uint32_t kMinConcurrentQueries = kCoroutinesPerThread;
 
 int g_listen_socket = -1;
@@ -520,17 +520,17 @@ QueryExecutionOutput execute_queries(const AsyncIndexPtr& async_index,
                          ? total_queries_executed / elapsed
                          : 0.0;
 
-  if (background_needed > 0) {
-    std::vector<diskann::QueryStats> combined_stats;
-    combined_stats.reserve(static_cast<std::size_t>(total_queries_executed));
-    combined_stats.insert(combined_stats.end(), stats_primary.begin(),
-                          stats_primary.end());
-    combined_stats.insert(combined_stats.end(), stats_background.begin(),
-                          stats_background.end());
-    log_iteration_stats(L, qps, combined_stats);
-  } else {
-    log_iteration_stats(L, qps, stats_primary);
-  }
+  // if (background_needed > 0) {
+  //   std::vector<diskann::QueryStats> combined_stats;
+  //   combined_stats.reserve(static_cast<std::size_t>(total_queries_executed));
+  //   combined_stats.insert(combined_stats.end(), stats_primary.begin(),
+  //                         stats_primary.end());
+  //   combined_stats.insert(combined_stats.end(), stats_background.begin(),
+  //                         stats_background.end());
+  //   log_iteration_stats(L, qps, combined_stats);
+  // } else {
+  //   log_iteration_stats(L, qps, stats_primary);
+  // }
 
   std::vector<uint32_t> result_ids_u32(result_ids_primary.size());
   diskann::convert_types<uint64_t, uint32_t>(
@@ -637,7 +637,7 @@ bool execute_streaming_query(const AsyncIndexPtr& async_index,
   stats_vec.reserve(static_cast<std::size_t>(target_concurrency));
   stats_vec.push_back(primary_stats);
   stats_vec.insert(stats_vec.end(), background_stats.begin(), background_stats.end());
-  log_iteration_stats(L, qps, stats_vec);
+  // log_iteration_stats(L, qps, stats_vec);
 
   return true;
 }
@@ -780,7 +780,7 @@ void handle_client_connection(int connfd, const AsyncIndexPtr& async_index,
       // std::cout << "[server] streaming enabled for single query" << std::endl;
     }
 
-    print_search_header();
+    // print_search_header();
     bool response_ok = true;
     if (streaming_active) {
       response_ok = execute_streaming_query(async_index, scheduler, payload,

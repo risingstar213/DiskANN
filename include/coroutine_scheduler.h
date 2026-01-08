@@ -241,13 +241,32 @@ private:
     std::unordered_map<uint64_t, PendingEntry> pending_ops_;  // op_id -> entry
 
     struct PendingSubmission {
-        int fd;
-        AlignedRead read;
-        IOAwaitable* awaitable;
+        int fd = -1;
+        AlignedRead read{};
+        IOAwaitable* awaitable = nullptr;
     };
 
-    std::mutex submission_mutex_;
-    std::deque<PendingSubmission> submission_queue_;
+    // Simple bounded MPSC lock-free queue for submissions
+    class SubmissionQueue {
+    public:
+        explicit SubmissionQueue(size_t capacity);
+        bool enqueue(PendingSubmission&& item);
+        bool dequeue(PendingSubmission& out);
+
+    private:
+        struct Slot {
+            std::atomic<bool> ready{false};
+            PendingSubmission value{};
+        };
+
+        const size_t capacity_;
+        std::vector<Slot> buffer_;
+        std::atomic<size_t> head_{0};
+        std::atomic<size_t> tail_{0};
+    };
+
+    static constexpr size_t kSubmissionQueueCapacity = MAX_ENTRIES * 8;
+    SubmissionQueue submission_queue_;
 
     // 跟踪协程执行
     std::atomic<uint32_t> pending_cnts_{0};
