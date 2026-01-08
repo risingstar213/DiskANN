@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <iostream>
 #include <set>
 
@@ -321,13 +322,16 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
             if (streaming->first_stage_min_results > 0) {
                 stage_one_target = std::min<uint32_t>(static_cast<uint32_t>(k_search), streaming->first_stage_min_results);
             } else {
-                float ratio = (streaming->first_stage_fraction <= 0.0f) ? 0.2f : streaming->first_stage_fraction;
+                float ratio = (streaming->first_stage_fraction <= 0.0f) ? 0.5f : streaming->first_stage_fraction;
                 auto tentative = static_cast<uint32_t>(
                     std::ceil(ratio * static_cast<float>(std::min<uint64_t>(k_search, capped_k))));
                 stage_one_target = std::min<uint32_t>(static_cast<uint32_t>(k_search), std::max<uint32_t>(tentative, 1u));
             }
         }
     }
+
+    std::timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
 
     auto emit_stage = [&](uint32_t stage_idx, bool is_final, const std::vector<Neighbor> &source, size_t target_total) {
         if (!streaming_enabled || streaming->emit == nullptr) {
@@ -387,8 +391,19 @@ Task<void> AsyncPQFlashIndex<T, LabelT>::async_search_impl(
 
         stage_emit_cursor = stage_emitted_ids.size();
 
+        std::timespec emit_time;
+        clock_gettime(CLOCK_MONOTONIC, &emit_time);
+
         streaming->emit(streaming->user_context, streaming->query_id, stage_idx, id_ptr, dist_ptr, needed_new,
                         is_final);
+
+        std::timespec current_time;
+        clock_gettime(CLOCK_MONOTONIC, &current_time);
+        // 打印emit time和current time相对于start_time的差值
+        printf("[streaming] query_id=%u stage=%u emit_time=%lu ms current_time=%lu ms\n",
+               streaming->query_id, stage_idx,
+               (emit_time.tv_sec - start_time.tv_sec) * 1000 + (emit_time.tv_nsec - start_time.tv_nsec) / 1000000,
+               (current_time.tv_sec - start_time.tv_sec) * 1000 + (current_time.tv_nsec - start_time.tv_nsec) / 1000000);
     };
     
     // Reset query scratch - same as original

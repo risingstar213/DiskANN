@@ -28,9 +28,9 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <cstdint>
 #include <limits>
 #include <memory>
-#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -49,15 +49,17 @@ using DataType = float;
 constexpr std::string_view kDistanceFunction{"l2"};
 constexpr std::string_view kIndexPathPrefix{
     "/mnt/dataset/wiki_dpr_new/disk_index_wiki_dpr_base_R128_L256_A1.2"};
+constexpr std::string_view kBackgroundQueryPath{
+  "/mnt/dataset/question_total/question_total.fbin"};
 
-constexpr uint32_t kBeamWidth = 50;
+constexpr uint32_t kBeamWidth = 64;
 constexpr uint32_t kVectorDim = 768;
 constexpr uint32_t kNumThreads = 1;
 constexpr uint32_t kNodesToCache = 0;
 constexpr uint32_t kSearchListMultiplier = 40;
 constexpr bool kUseReorderData = false;
 constexpr uint32_t kIdLength = 8;
-constexpr uint32_t kCoroutinesPerThread = 50;
+constexpr uint32_t kCoroutinesPerThread = 150;
 constexpr uint32_t kMinConcurrentQueries = kCoroutinesPerThread;
 
 int g_listen_socket = -1;
@@ -77,6 +79,14 @@ struct AlignedDeleter {
 };
 
 using UniqueAlignedPtr = std::unique_ptr<DataType, AlignedDeleter>;
+
+struct BackgroundQueries {
+  UniqueAlignedPtr data{nullptr};
+  size_t aligned_dim = 0;
+  size_t count = 0;
+};
+
+BackgroundQueries g_background_queries;
 
 struct QueryPayload {
   SearchRequest  request{};
@@ -130,42 +140,6 @@ std::string sanitize_line(const std::string& input) {
   cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), '\n'), cleaned.end());
   cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), '\0'), cleaned.end());
   return cleaned;
-}
-
-std::optional<SearchRequest> parse_metadata(const std::string& raw_metadata) {
-  const std::string metadata = sanitize_line(raw_metadata);
-  const auto first_comma = metadata.find(',');
-  const auto second_comma = first_comma == std::string::npos
-                                 ? std::string::npos
-                                 : metadata.find(',', first_comma + 1);
-
-  if (first_comma == std::string::npos || second_comma == std::string::npos) {
-    return std::nullopt;
-  }
-
-  size_t third_comma = metadata.find(',', second_comma + 1);
-  std::string topk_str = metadata.substr(0, first_comma);
-  std::string query_count_str =
-      metadata.substr(first_comma + 1, second_comma - first_comma - 1);
-  std::string payload_str;
-  if (third_comma == std::string::npos) {
-    payload_str = metadata.substr(second_comma + 1);
-  } else {
-    payload_str = metadata.substr(second_comma + 1, third_comma - second_comma - 1);
-  }
-
-  try {
-    SearchRequest request{};
-    request.topk = std::stoi(topk_str);
-    request.query_count = std::stoi(query_count_str);
-    request.payload_chars = std::stoull(payload_str);
-    if (request.topk <= 0 || request.query_count <= 0 || request.payload_chars == 0) {
-      return std::nullopt;
-    }
-    return request;
-  } catch (const std::exception&) {
-    return std::nullopt;
-  }
 }
 
 bool send_all(int fd, const char* data, size_t bytes) {
@@ -344,6 +318,45 @@ void configure_cache(const AsyncIndexPtr& async_index) {
   async_index->load_cache_list(node_list);
 }
 
+BackgroundQueries load_background_queries() {
+  DataType* raw_queries = nullptr;
+  size_t    available_queries = 0;
+  size_t    dim = 0;
+  size_t    aligned_dim = 0;
+
+  diskann::load_aligned_bin<DataType>(std::string(kBackgroundQueryPath),
+                                      raw_queries, available_queries, dim,
+                                      aligned_dim);
+
+  if (dim != kVectorDim) {
+    throw std::runtime_error(
+        "Background query dimension mismatch with configured kVectorDim");
+  }
+
+  const size_t desired = static_cast<size_t>(kMinConcurrentQueries);
+  if (available_queries < desired) {
+    throw std::runtime_error(
+        "Background query file does not contain enough vectors for backend load");
+  }
+
+  DataType* trimmed_queries = nullptr;
+  const size_t copy_bytes = desired * aligned_dim * sizeof(DataType);
+  diskann::alloc_aligned(reinterpret_cast<void**>(&trimmed_queries),
+                         copy_bytes, 8 * sizeof(DataType));
+  std::memcpy(trimmed_queries, raw_queries, copy_bytes);
+  diskann::aligned_free(raw_queries);
+
+  return BackgroundQueries{UniqueAlignedPtr(trimmed_queries), aligned_dim,
+                           desired};
+}
+
+void initialize_background_queries() {
+  g_background_queries = load_background_queries();
+  diskann::cout << "Loaded " << g_background_queries.count
+                << " backend queries from " << kBackgroundQueryPath
+                << std::endl;
+}
+
 int create_listen_socket(uint16_t port) {
   int listen_socket = ::socket(AF_INET, SOCK_STREAM, 0);
   if (listen_socket < 0) {
@@ -379,34 +392,25 @@ int create_listen_socket(uint16_t port) {
 }
 
 bool receive_query_payload(int connfd, QueryPayload& payload) {
-  std::array<char, kBufferLength> metadata_buffer{};
-  ssize_t metadata_bytes =
-      ::recv(connfd, metadata_buffer.data(), metadata_buffer.size(), 0);
-  if (metadata_bytes <= 0) {
+  constexpr size_t kMetadataBytes = 3 * sizeof(uint32_t);
+  std::string metadata_raw;
+  if (!recv_exact(connfd, kMetadataBytes, metadata_raw)) {
     std::cout << "[server] failed to receive metadata" << std::endl;
     return false;
   }
 
-  std::string metadata_raw(metadata_buffer.data(),
-                           static_cast<std::size_t>(metadata_bytes));
-  auto request_opt = parse_metadata(metadata_raw);
-  if (!request_opt.has_value()) {
-    std::cout << "[server] metadata parse error: " << metadata_raw
-              << std::endl;
+  const uint32_t topk = *(uint32_t*)(metadata_raw.data());
+  const uint32_t query_count = *(uint32_t*)(metadata_raw.data() + sizeof(uint32_t));
+  const uint32_t payload_chars = *(uint32_t*)(metadata_raw.data() + 2 * sizeof(uint32_t));
+
+  if (topk == 0 || query_count == 0 || payload_chars == 0) {
+    std::cout << "[server] invalid metadata values" << std::endl;
     return false;
   }
 
-  payload.request = request_opt.value();
-  // std::cout << "[server] meta data: topk=" << payload.request.topk
-  //           << " query_count=" << payload.request.query_count
-  //           << " payload_chars=" << payload.request.payload_chars
-  //           << std::endl;
-
-  constexpr std::string_view kAck{"Go"};
-  if (!send_all(connfd, kAck.data(), kAck.size())) {
-    std::cout << "[server] failed to send ack" << std::endl;
-    return false;
-  }
+  payload.request.topk = static_cast<int>(topk);
+  payload.request.query_count = static_cast<int>(query_count);
+  payload.request.payload_chars = static_cast<size_t>(payload_chars);
 
   std::string query_vector_payload;
   if (!recv_exact(connfd, payload.request.payload_chars,
@@ -417,11 +421,29 @@ bool receive_query_payload(int connfd, QueryPayload& payload) {
   // std::cout << "[server] received query payload size="
   //           << query_vector_payload.size() << std::endl;
 
+  const size_t expected_bytes =
+      query_count * static_cast<size_t>(kVectorDim) * sizeof(DataType);
+  if (query_vector_payload.size() != expected_bytes) {
+    std::cout << "[server] payload size mismatch expected=" << expected_bytes
+              << " actual=" << query_vector_payload.size() << std::endl;
+    return false;
+  }
+
   DataType* raw_query = nullptr;
-  size_t    query_aligned_dim = 0;
-  diskann::load_aligned_bin_mem<DataType>(query_vector_payload, raw_query,
-                                          payload.request.query_count,
-                                          kVectorDim, query_aligned_dim);
+  const size_t query_aligned_dim = ROUND_UP(kVectorDim, 8);
+  const size_t alloc_size = query_count * query_aligned_dim * sizeof(DataType);
+  diskann::alloc_aligned(reinterpret_cast<void**>(&raw_query), alloc_size,
+                         8 * sizeof(DataType));
+
+  const DataType* src_ptr =
+      reinterpret_cast<const DataType*>(query_vector_payload.data());
+  for (size_t i = 0; i < query_count; ++i) {
+    DataType* dst = raw_query + i * query_aligned_dim;
+    std::memcpy(dst, src_ptr + i * kVectorDim,
+                static_cast<size_t>(kVectorDim) * sizeof(DataType));
+    std::memset(dst + kVectorDim, 0,
+                (query_aligned_dim - kVectorDim) * sizeof(DataType));
+  }
 
   payload.query.reset(raw_query);
   payload.aligned_dim = query_aligned_dim;
@@ -459,6 +481,11 @@ QueryExecutionOutput execute_queries(const AsyncIndexPtr& async_index,
 
   const DataType* base_query = payload.query.get();
   const size_t    aligned_dim = payload.aligned_dim;
+  if (g_background_queries.count == 0 || !g_background_queries.data) {
+    throw std::runtime_error("Background queries are not initialized");
+  }
+  const DataType* background_base = g_background_queries.data.get();
+  const size_t    background_aligned_dim = g_background_queries.aligned_dim;
 
   auto enqueue_search = [&](const DataType* query_ptr, uint64_t* id_out,
                             float* dist_out, diskann::QueryStats* stat_out) {
@@ -484,9 +511,10 @@ QueryExecutionOutput execute_queries(const AsyncIndexPtr& async_index,
     stats_background.resize(static_cast<std::size_t>(background_needed));
 
     for (int i = 0; i < background_needed; ++i) {
-      const int source_idx = primary_queries == 0 ? 0 : i % primary_queries;
+      const size_t source_idx =
+        static_cast<size_t>(i) % g_background_queries.count;
       const DataType* background_query =
-          base_query + static_cast<std::size_t>(source_idx) * aligned_dim;
+        background_base + source_idx * background_aligned_dim;
       enqueue_search(
           background_query,
           result_ids_background.data() +
@@ -552,6 +580,12 @@ bool execute_streaming_query(const AsyncIndexPtr& async_index,
   const size_t aligned_dim = payload.aligned_dim;
   const size_t stats_dim = static_cast<size_t>(std::max(1, request.topk));
 
+  if (g_background_queries.count == 0 || !g_background_queries.data) {
+    throw std::runtime_error("Background queries are not initialized");
+  }
+  const DataType* background_base = g_background_queries.data.get();
+  const size_t background_aligned_dim = g_background_queries.aligned_dim;
+
   const int primary_queries = request.query_count;
   const int target_concurrency =
       std::max(primary_queries, static_cast<int>(kMinConcurrentQueries));
@@ -594,9 +628,10 @@ bool execute_streaming_query(const AsyncIndexPtr& async_index,
   }
 
   for (int i = 0; i < background_needed; ++i) {
-    const int source_idx = primary_queries == 0 ? 0 : i % primary_queries;
+    const size_t source_idx =
+      static_cast<size_t>(i) % g_background_queries.count;
     const DataType* background_query =
-        base_query + static_cast<std::size_t>(source_idx) * aligned_dim;
+      background_base + source_idx * background_aligned_dim;
     uint64_t* id_out = background_ids.data() + static_cast<std::size_t>(i) * request.topk;
     float* dist_out = background_dists.data() + static_cast<std::size_t>(i) * request.topk;
     enqueue_search(background_query, id_out, dist_out,
@@ -832,6 +867,8 @@ int main() {
 
     AsyncIndexPtr async_index = load_async_index(metric);
     configure_cache(async_index);
+
+    initialize_background_queries();
 
     int listen_socket = create_listen_socket(kDefaultPort);
     if (listen_socket < 0) {

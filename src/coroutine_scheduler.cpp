@@ -23,8 +23,8 @@ std::unique_ptr<CoroutineScheduler> g_scheduler = nullptr;
 CoroutineScheduler::CoroutineScheduler()
     : submission_queue_(kSubmissionQueueCapacity) {
     // Default backend: io_uring
-    // io_backend_ = std::make_unique<IoRingWrapper>(MAX_ENTRIES, 0);
-    io_backend_ = std::make_unique<LibAioWrapper>(MAX_ENTRIES);
+    io_backend_ = std::make_unique<IoRingWrapper>(MAX_ENTRIES, 0);
+    // io_backend_ = std::make_unique<LibAioWrapper>(MAX_ENTRIES);
 }
 
 

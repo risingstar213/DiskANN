@@ -7,7 +7,7 @@
 IoRingWrapper::IoRingWrapper(unsigned entries, unsigned flags) {
 #ifdef ENABLE_HITCHHIKE
     // 启用Hitchhike优化
-    flags |= IORING_SETUP_HIT;
+    flags |= IORING_SETUP_HIT | IORING_SETUP_IOPOLL;
 #endif
     int ret = io_uring_queue_init(entries, &ring_, flags);
     if (ret < 0) throw std::runtime_error("io_uring_queue_init failed");
@@ -115,7 +115,9 @@ std::vector<AsyncCompletion> IoRingWrapper::poll_completions(int max_events) {
     int got = 0;
     while (got < max_events) {
         int ret = peek_cqe(&cqe);
-        if (ret != 0 || cqe == nullptr) break;
+        if (ret != 0 || cqe == nullptr) {
+            break;
+        }
         AsyncCompletion ac;
         ac.op_id = cqe->user_data;
         ac.result = cqe->res;

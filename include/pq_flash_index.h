@@ -32,7 +32,7 @@ struct SearchStreamOptions
     uint32_t query_id = 0;
     uint32_t stage_count = 0;
     uint32_t first_stage_min_results = 0;
-    float first_stage_fraction = 0.2f;
+    float first_stage_fraction = 0.5f;
     uint32_t min_ios_before_emit = 0;
     uint32_t min_steps_before_emit = 0;
     bool include_distances = false;
