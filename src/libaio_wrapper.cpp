@@ -19,9 +19,9 @@ LibAioWrapper::LibAioWrapper(unsigned entries) {
     entries_ = entries;
     iocb_bufs_ = std::make_unique<struct iocb[]>(entries);
     memset(&iocb_bufs_[0], 0, sizeof(struct iocb) * entries);
-#ifdef ENABLE_HITCHHIKE
-    hitchhike_bufs_ = std::make_unique<struct hitchhiker[]>(entries);
-#endif
+    if (hitchhike_enabled()) {
+        hitchhike_bufs_ = std::make_unique<struct hitchhiker[]>(entries);
+    }
 }
 
 LibAioWrapper::~LibAioWrapper() {
@@ -41,42 +41,41 @@ void LibAioWrapper::flush_batch() {
         printf("Too many pending reads in batch: %zu\n", pending_reads_.size());
         throw std::runtime_error("Too many pending reads in batch (>96), likely a bug");
     }
+    if (hitchhike_enabled()) {
+        struct iocb* iocb_ptr = &iocb_bufs_[next_op_id_];
+        io_prep_pread(iocb_ptr, pending_reads_[0].fd, pending_reads_[0].buf, pending_reads_[0].len, pending_reads_[0].offset);
+        struct hitchhiker* hit = &hitchhike_bufs_[next_op_id_];
+        hit->in_use = 0;
 
-#ifdef ENABLE_HITCHHIKE
-    struct iocb* iocb_ptr = &iocb_bufs_[next_op_id_];
-    io_prep_pread(iocb_ptr, pending_reads_[0].fd, pending_reads_[0].buf, pending_reads_[0].len, pending_reads_[0].offset);
-    struct hitchhiker* hit = &hitchhike_bufs_[next_op_id_];
-    hit->in_use = 0;
+        if (pending_reads_.size() > 1) {
+            for (size_t i = 1; i < pending_reads_.size(); ++i) {
+                hit->addr[i-1] = (uint64_t)pending_reads_[i].offset;
+                hit->iov[i-1] = (uint64_t)pending_reads_[i].buf;
+            }
+            hit->max = pending_reads_.size() - 2;
+            hit->in_use = 1;
+            hit->iov_use = 1;
+            hit->size = 4096; // page size
 
-    if (pending_reads_.size() > 1) {
-        for (size_t i = 1; i < pending_reads_.size(); ++i) {
-            hit->addr[i-1] = (uint64_t)pending_reads_[i].offset;
-            hit->iov[i-1] = (uint64_t)pending_reads_[i].buf;
+            iocb_ptr->u.c.__pad3 = 4096; // HITCHHIKE标志
         }
-        hit->max = pending_reads_.size() - 2;
-        hit->in_use = 1;
-        hit->iov_use = 1;
-        hit->size = 4096; // page size
 
-        iocb_ptr->u.c.__pad3 = 4096; // HITCHHIKE标志
+        iocb_ptr->data = (void*)next_op_id_; // 所有请求使用相同的op_id
+        io_submit_hit(ctx_, 1, &iocb_ptr, &hit);
+    } else {
+        std::vector<struct iocb*> iocb_ptrs;
+        iocb_ptrs.reserve(pending_reads_.size());
+        for (int32_t i = 0; i < pending_reads_.size(); ++i) {
+            auto& req = pending_reads_[i];
+            io_prep_pread(&iocb_bufs_[i], req.fd, req.buf, req.len, req.offset);
+            iocb_bufs_[i].data = (void*)next_op_id_; // 所有请求使用相同的op_id
+            iocb_ptrs.push_back(&iocb_bufs_[i]);
+        }
+        int ret = io_submit(ctx_, iocb_ptrs.size(), iocb_ptrs.data());
+        if (ret < 0) {
+            throw std::runtime_error("io_submit failed");
+        }
     }
-
-    iocb_ptr->data = (void*)next_op_id_; // 所有请求使用相同的op_id
-    io_submit_hit(ctx_, 1, &iocb_ptr, &hit);
-#else
-    std::vector<struct iocb*> iocb_ptrs;
-    iocb_ptrs.reserve(pending_reads_.size());
-    for (int32_t i = 0; i < pending_reads_.size(); ++i) {
-        auto& req = pending_reads_[i];
-        io_prep_pread(&iocb_bufs_[i], req.fd, req.buf, req.len, req.offset);
-        iocb_bufs_[i].data = (void*)next_op_id_; // 所有请求使用相同的op_id
-        iocb_ptrs.push_back(&iocb_bufs_[i]);
-    }
-    int ret = io_submit(ctx_, iocb_ptrs.size(), iocb_ptrs.data());
-    if (ret < 0) {
-        throw std::runtime_error("io_submit failed");
-    }
-#endif
     pending_reads_.clear();
     next_op_id_ = (next_op_id_ + 1) % entries_; // 提交后递增op_id，为下一个批次做准备
 }

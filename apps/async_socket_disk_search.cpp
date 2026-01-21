@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 #include "async_pq_flash_index.h"
+#include "async_io.h"
 #include "coroutine_scheduler.h"
 #include "logger.h"
 #include "percentile_stats.h"
@@ -859,7 +860,22 @@ void run_server(const AsyncIndexPtr& async_index, int listen_socket) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  bool enable_hitchhike = true;
+  for (int i = 1; i < argc; ++i) {
+    std::string_view arg(argv[i]);
+    if (arg == "--enable-hitchhike") {
+      enable_hitchhike = true;
+    } else if (arg == "--disable-hitchhike") {
+      enable_hitchhike = false;
+    } else {
+      std::cerr << "Unknown argument: " << arg << std::endl;
+      std::cerr << "Usage: async_socket_disk_search [--enable-hitchhike|--disable-hitchhike]" << std::endl;
+      return -1;
+    }
+  }
+
+  g_enable_hitchhike = enable_hitchhike;
   try {
     diskann::Metric metric = resolve_metric();
     validate_configuration(metric);

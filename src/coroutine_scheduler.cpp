@@ -16,6 +16,8 @@
 #include "libaio_wrapper.h"
 #include "async_io.h"
 
+bool g_enable_hitchhike = true;
+
 namespace diskann {
 
 std::unique_ptr<CoroutineScheduler> g_scheduler = nullptr;
@@ -23,8 +25,11 @@ std::unique_ptr<CoroutineScheduler> g_scheduler = nullptr;
 CoroutineScheduler::CoroutineScheduler()
     : submission_queue_(kSubmissionQueueCapacity) {
     // Default backend: io_uring
-    io_backend_ = std::make_unique<IoRingWrapper>(MAX_ENTRIES, 0);
-    // io_backend_ = std::make_unique<LibAioWrapper>(MAX_ENTRIES);
+    if (hitchhike_enabled()) {
+        io_backend_ = std::make_unique<IoRingWrapper>(MAX_ENTRIES, 0);
+    } else {
+        io_backend_ = std::make_unique<LibAioWrapper>(MAX_ENTRIES);
+    }
 }
 
 
@@ -90,10 +95,10 @@ void CoroutineScheduler::run() {
             break;
         }
 
-        usleep(100); // 避免忙等待
+        usleep(10); // 避免忙等待
     }
 
-    usleep(100); // 确保io线程处理完剩余的completion
+    usleep(10); // 确保io线程处理完剩余的completion
 }
 
 void CoroutineScheduler::stop() {
@@ -150,37 +155,14 @@ void CoroutineScheduler::process_completions() {
         auto it = pending_ops_.find(op_id);
         if (it != pending_ops_.end()) {
             auto &entry = it->second;
-#ifdef ENABLE_HITCHHIKE
-            for (auto awaitable_ptr : entry.awaitables) {
-                if (awaitable_ptr == nullptr) {
-                    continue;
-                }
-                awaitable_ptr->result = result;
-                uint8_t desired = IOAwaitable::Status::PENDING;
-                if (!awaitable_ptr->status.compare_exchange_strong(desired, IOAwaitable::Status::COMPLETED)) {
-                    awaitable_ptr->status.store(IOAwaitable::Status::COMPLETED, std::memory_order_release);
-                    // 等待协程被设置
-                    auto waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_relaxed);
-                    while (waiter == std::coroutine_handle<>{}) {
-                        waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_relaxed);
-                    }
-                    schedule_coroutine(waiter);
-                }
-            }
-            pending_ops_.erase(it);
-#else
-            if (entry.remaining > 0) {
-                entry.remaining--; // 减少待完成计数
-            }
-            if (entry.remaining == 0) {
+            if (hitchhike_enabled()) {
                 for (auto awaitable_ptr : entry.awaitables) {
                     if (awaitable_ptr == nullptr) {
                         continue;
                     }
-                    awaitable_ptr->result = result;  // 所有awaitable使用最后一个result
+                    awaitable_ptr->result = result;
                     uint8_t desired = IOAwaitable::Status::PENDING;
                     if (!awaitable_ptr->status.compare_exchange_strong(desired, IOAwaitable::Status::COMPLETED)) {
-                        assert(desired == IOAwaitable::Status::WAITING);
                         awaitable_ptr->status.store(IOAwaitable::Status::COMPLETED, std::memory_order_release);
                         // 等待协程被设置
                         auto waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_relaxed);
@@ -191,8 +173,31 @@ void CoroutineScheduler::process_completions() {
                     }
                 }
                 pending_ops_.erase(it);
+            } else {
+                if (entry.remaining > 0) {
+                    entry.remaining--; // 减少待完成计数
+                }
+                if (entry.remaining == 0) {
+                    for (auto awaitable_ptr : entry.awaitables) {
+                        if (awaitable_ptr == nullptr) {
+                            continue;
+                        }
+                        awaitable_ptr->result = result;  // 所有awaitable使用最后一个result
+                        uint8_t desired = IOAwaitable::Status::PENDING;
+                        if (!awaitable_ptr->status.compare_exchange_strong(desired, IOAwaitable::Status::COMPLETED)) {
+                            assert(desired == IOAwaitable::Status::WAITING);
+                            awaitable_ptr->status.store(IOAwaitable::Status::COMPLETED, std::memory_order_release);
+                            // 等待协程被设置
+                            auto waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_relaxed);
+                            while (waiter == std::coroutine_handle<>{}) {
+                                waiter = awaitable_ptr->waiting_coroutine.load(std::memory_order_relaxed);
+                            }
+                            schedule_coroutine(waiter);
+                        }
+                    }
+                    pending_ops_.erase(it);
+                }
             }
-#endif
         }
     }
 }
@@ -297,11 +302,11 @@ void CoroutineScheduler::drain_submission_queue() {
         }
         entry.awaitables.push_back(req.awaitable);
 
-#if !defined(ENABLE_HITCHHIKE)
-        entry.remaining += 1;  // 非HITCHHIKE模式：每个请求都增加计数
-#else
-        if (entry.remaining == 0) entry.remaining = 1; // HITCHHIKE: single completion
-#endif
+        if (!hitchhike_enabled()) {
+            entry.remaining += 1;  // 非HITCHHIKE模式：每个请求都增加计数
+        } else {
+            if (entry.remaining == 0) entry.remaining = 1; // HITCHHIKE: single completion
+        }
     }
 }
 

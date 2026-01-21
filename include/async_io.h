@@ -3,8 +3,8 @@
 #pragma once
 
 #include <cstdint>
-#include <vector>
 #include <stdexcept>
+#include <vector>
 
 struct AsyncCompletion {
     uint64_t op_id;
@@ -31,4 +31,5 @@ public:
     virtual std::vector<AsyncCompletion> poll_completions(int max_events) = 0;
 };
 
-#define ENABLE_HITCHHIKE
+extern bool g_enable_hitchhike;
+inline bool hitchhike_enabled() { return g_enable_hitchhike; }

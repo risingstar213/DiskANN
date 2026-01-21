@@ -5,10 +5,10 @@
 #include "async_io.h"
 
 IoRingWrapper::IoRingWrapper(unsigned entries, unsigned flags) {
-#ifdef ENABLE_HITCHHIKE
-    // 启用Hitchhike优化
-    flags |= IORING_SETUP_HIT | IORING_SETUP_IOPOLL;
-#endif
+    if (hitchhike_enabled()) {
+        // 启用Hitchhike优化
+        flags |= IORING_SETUP_HIT | IORING_SETUP_IOPOLL;
+    }
     int ret = io_uring_queue_init(entries, &ring_, flags);
     if (ret < 0) throw std::runtime_error("io_uring_queue_init failed");
 }
@@ -59,43 +59,43 @@ void IoRingWrapper::flush_batch() {
     // 粗粒度收割：无论是否启用HITCHHIKE，都使用共享的op_id
     uint64_t batch_op_id = next_op_id++;
 
-#ifdef ENABLE_HITCHHIKE
-    struct io_uring_sqe* sqe = get_sqe();
-    uint32_t sqe_index = sqe - ring_.sq.sqes;
-    if (ring_.hites == nullptr) {
-        printf("ring_.hites is null\n");
-        throw std::runtime_error("Hitchhike not initialized in io_uring");
-    }
-    // reverse
-    // std::reverse(pending_reads_.begin(), pending_reads_.end());
-
-    // 只提交第一个请求，其他的通过Hitchhike传递
-    PendingRead* req = &pending_reads_[0];
-    io_uring_prep_read(sqe, req->fd, req->buf, 4096, req->offset);
-    sqe->user_data = batch_op_id;  // 使用共享的batch_op_id
-
-    if (pending_reads_.size() > 1) {
-        struct hitchhiker* hit = &ring_.hites[sqe_index];
-        hit->max = pending_reads_.size() - 2;
-        hit->in_use = 1;
-        hit->iov_use = 1;
-        hit->size = 4096; // page size
-        for (uint32_t i = 1; i < pending_reads_.size(); ++i) {
-            hit->addr[i-1] = (uint64_t)pending_reads_[i].offset;
-            hit->iov[i-1] = (uint64_t)pending_reads_[i].buf;
-        }
-        sqe->flags |= IOSQE_HIT; // 标记为Hitchhike请求
-    }
-#else
-    // 非HITCHHIKE路径：也使用粗粒度收割（所有请求共享同一个op_id）
-    for (const auto& req : pending_reads_) {
+    if (hitchhike_enabled()) {
         struct io_uring_sqe* sqe = get_sqe();
-        if (!sqe) throw std::runtime_error("Failed to get SQE for read");
-        
-        io_uring_prep_read(sqe, req.fd, req.buf, req.len, req.offset);
-        sqe->user_data = batch_op_id;  // 所有SQE使用相同的batch_op_id
+        uint32_t sqe_index = sqe - ring_.sq.sqes;
+        if (ring_.hites == nullptr) {
+            printf("ring_.hites is null\n");
+            throw std::runtime_error("Hitchhike not initialized in io_uring");
+        }
+        // reverse
+        // std::reverse(pending_reads_.begin(), pending_reads_.end());
+
+        // 只提交第一个请求，其他的通过Hitchhike传递
+        PendingRead* req = &pending_reads_[0];
+        io_uring_prep_read(sqe, req->fd, req->buf, 4096, req->offset);
+        sqe->user_data = batch_op_id;  // 使用共享的batch_op_id
+
+        if (pending_reads_.size() > 1) {
+            struct hitchhiker* hit = &ring_.hites[sqe_index];
+            hit->max = pending_reads_.size() - 2;
+            hit->in_use = 1;
+            hit->iov_use = 1;
+            hit->size = 4096; // page size
+            for (uint32_t i = 1; i < pending_reads_.size(); ++i) {
+                hit->addr[i-1] = (uint64_t)pending_reads_[i].offset;
+                hit->iov[i-1] = (uint64_t)pending_reads_[i].buf;
+            }
+            sqe->flags |= IOSQE_HIT; // 标记为Hitchhike请求
+        }
+    } else {
+        // 非HITCHHIKE路径：也使用粗粒度收割（所有请求共享同一个op_id）
+        for (const auto& req : pending_reads_) {
+            struct io_uring_sqe* sqe = get_sqe();
+            if (!sqe) throw std::runtime_error("Failed to get SQE for read");
+            
+            io_uring_prep_read(sqe, req.fd, req.buf, req.len, req.offset);
+            sqe->user_data = batch_op_id;  // 所有SQE使用相同的batch_op_id
+        }
     }
-#endif
     submit();
     pending_reads_.clear();
 }

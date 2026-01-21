@@ -5,6 +5,7 @@
 #include <boost/program_options.hpp>
 
 #include "async_pq_flash_index.h"
+#include "async_io.h"
 #include "coroutine_scheduler.h"
 #include "disk_utils.h"
 #include "math_utils.h"
@@ -349,6 +350,7 @@ int main(int argc, char **argv)
     uint32_t num_threads, K, W, num_nodes_to_cache, search_io_limit;
     std::vector<uint32_t> Lvec;
     bool use_reorder_data = false;
+    bool enable_hitchhike = true;
     float fail_if_recall_below = 0.0f;
 
     po::options_description desc{
@@ -404,6 +406,9 @@ int main(int argc, char **argv)
         optional_configs.add_options()("fail_if_recall_below",
                                        po::value<float>(&fail_if_recall_below)->default_value(0.0f),
                                        program_options_utils::FAIL_IF_RECALL_BELOW);
+        optional_configs.add_options()("enable_hitchhike",
+                           po::value<bool>(&enable_hitchhike)->default_value(true),
+                           "Enable hitchhike IO optimizations (io_uring/libaio). Default: true");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -418,6 +423,7 @@ int main(int argc, char **argv)
         po::notify(vm);
         if (vm["use_reorder_data"].as<bool>())
             use_reorder_data = true;
+        g_enable_hitchhike = enable_hitchhike;
     }
     catch (const std::exception &ex)
     {

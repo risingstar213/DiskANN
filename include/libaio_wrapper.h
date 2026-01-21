@@ -2,11 +2,12 @@
 // 封装libaio相关API，接口风格仿照io_ring_wrapper
 #pragma once
 #include <libaio.h>
-#include <vector>
-#include <stdexcept>
+#include <liburing.h>
 #include <cstdint>
-#include <sys/types.h>
 #include <memory>
+#include <stdexcept>
+#include <sys/types.h>
+#include <vector>
 #include "async_io.h"
 
 class LibAioWrapper : public AsyncIO {
@@ -38,7 +39,5 @@ private:
     std::vector<PendingRead> pending_reads_;
 
     std::unique_ptr<struct iocb[]> iocb_bufs_;
-#ifdef ENABLE_HITCHHIKE
     std::unique_ptr<struct hitchhiker[]> hitchhike_bufs_;
-#endif
 };
