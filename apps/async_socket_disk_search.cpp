@@ -860,17 +860,37 @@ void run_server(const AsyncIndexPtr& async_index, int listen_socket) {
 
 }  // namespace
 
+bool parse_bool_arg(std::string_view value, bool& out) {
+  if (value == "true" || value == "1") {
+    out = true;
+    return true;
+  }
+  if (value == "false" || value == "0") {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
 int main(int argc, char** argv) {
   bool enable_hitchhike = true;
   for (int i = 1; i < argc; ++i) {
     std::string_view arg(argv[i]);
     if (arg == "--enable-hitchhike") {
-      enable_hitchhike = true;
-    } else if (arg == "--disable-hitchhike") {
-      enable_hitchhike = false;
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for --enable-hitchhike" << std::endl;
+        std::cerr << "Usage: async_socket_disk_search [--enable-hitchhike <true|false>]" << std::endl;
+        return -1;
+      }
+      std::string_view value(argv[++i]);
+      if (!parse_bool_arg(value, enable_hitchhike)) {
+        std::cerr << "Invalid value for --enable-hitchhike: " << value << std::endl;
+        std::cerr << "Usage: async_socket_disk_search [--enable-hitchhike <true|false>]" << std::endl;
+        return -1;
+      }
     } else {
       std::cerr << "Unknown argument: " << arg << std::endl;
-      std::cerr << "Usage: async_socket_disk_search [--enable-hitchhike|--disable-hitchhike]" << std::endl;
+      std::cerr << "Usage: async_socket_disk_search [--enable-hitchhike <true|false>]" << std::endl;
       return -1;
     }
   }
